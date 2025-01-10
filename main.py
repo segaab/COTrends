@@ -16,18 +16,32 @@ def get_image_base64(image_path):
 def kofi_button():
     kofi_html = """
         <div style="display: flex; justify-content: center; margin-top: 1rem;">
+            <style>
+                .kofi-button {
+                    height: 54px; /* 1.5x the original height */
+                    max-width: 100%;
+                    border: 0;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+                    transition: transform 0.2s ease;
+                }
+                .kofi-button:hover {
+                    transform: translateY(-2px);
+                }
+                @media (max-width: 768px) {
+                    .kofi-button {
+                        height: 45px; /* Slightly smaller on mobile */
+                    }
+                }
+            </style>
             <a href='https://ko-fi.com/Q5Q818G1MT' target='_blank'>
-                <img height='36' 
-                     style='border:0px;height:36px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,0.2);transition:transform 0.2s ease;' 
+                <img class='kofi-button'
                      src='https://storage.ko-fi.com/cdn/kofi1.png?v=6' 
-                     border='0' 
-                     alt='Buy Me a Coffee at ko-fi.com'
-                     onmouseover="this.style.transform='translateY(-2px)'"
-                     onmouseout="this.style.transform='translateY(0)'" />
+                     alt='Buy Me a Coffee at ko-fi.com' />
             </a>
         </div>
     """
-    return components.html(kofi_html, height=50)
+    return components.html(kofi_html, height=75)  # Increased height to accommodate larger button
 
 # Asset lists by categories
 crypto = ["BITCOIN - CHICAGO MERCANTILE EXCHANGE", "ETHER CASH SETTLED - CHICAGO MERCANTILE EXCHANGE", "MICRO BITCOIN - CHICAGO MERCANTILE EXCHANGE", "MICRO ETHER - CHICAGO MERCANTILE EXCHANGE"]
