@@ -12,23 +12,36 @@ def init_firebase():
             # Try to load from streamlit secrets
             try:
                 firebase_credentials = json.loads(st.secrets["firebase"]["credentials"])
+                print("Successfully loaded credentials from Streamlit secrets")
             except Exception as e:
                 print(f"Failed to load from Streamlit secrets: {str(e)}")
                 # If that fails, try loading from local file
-                with open('.streamlit/secrets.toml', 'r') as f:
-                    content = f.read()
-                    json_str = content.split("'''")[1].strip()
-                    firebase_credentials = json.loads(json_str)
+                try:
+                    with open('.streamlit/secrets.toml', 'r') as f:
+                        content = f.read()
+                        # Find the credentials between triple quotes
+                        start = content.find("'''") + 3
+                        end = content.rfind("'''")
+                        if start == -1 or end == -1:
+                            raise ValueError("Could not find credentials in secrets.toml")
+                        json_str = content[start:end].strip()
+                        firebase_credentials = json.loads(json_str)
+                        print("Successfully loaded credentials from local secrets.toml")
+                except Exception as local_e:
+                    print(f"Failed to load from local file: {str(local_e)}")
+                    raise Exception("Failed to load Firebase credentials from both Streamlit secrets and local file")
             
             if not firebase_credentials:
-                raise Exception("Failed to load Firebase credentials")
+                raise Exception("Firebase credentials are empty")
             
             cred = credentials.Certificate(firebase_credentials)
             firebase_admin.initialize_app(cred)
+            print("Successfully initialized Firebase app")
         return firestore.client()
     except Exception as e:
-        print(f"Firebase initialization error: {str(e)}")
-        st.error(f"Firebase initialization error: {str(e)}")
+        error_msg = f"Firebase initialization error: {str(e)}"
+        print(error_msg)
+        st.error(error_msg)
         raise e
 
 def save_feature_request(feature_request, email):
