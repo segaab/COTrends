@@ -22,6 +22,7 @@ var/
 
 # Environment variables
 .env
+.streamlit/secrets.toml
 
 # IDE
 .idea/
