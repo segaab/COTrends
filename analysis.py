@@ -34,12 +34,12 @@ def analyze_change(aggregated_data):
 
         for group in ['noncomm_positions', 'comm_positions', 'nonrept_positions']:
             # Calculate positions and percentages
-            latest_long = float(latest_report.get(f'{group}_long_all', 0))
-            latest_short = float(latest_report.get(f'{group}_short_all', 0))
+            latest_long = float(latest_report[f'{group}_long_all'])
+            latest_short = float(latest_report[f'{group}_short_all'])
             total_latest = latest_long + latest_short
 
-            previous_long = float(previous_report.get(f'{group}_long_all', 0))
-            previous_short = float(previous_report.get(f'{group}_short_all', 0))
+            previous_long = float(previous_report[f'{group}_long_all'])
+            previous_short = float(previous_report[f'{group}_short_all'])
             total_previous = previous_long + previous_short
 
             # Calculate percentages and changes
@@ -68,8 +68,7 @@ def analyze_change(aggregated_data):
     df_analysis = df.copy()
     df_analysis.loc[df['group']=="noncomm_positions",'group'] = "Non-Commercial"
     df_analysis.loc[df['group']=="comm_positions",'group'] = "Commercial"
-    df_analysis.loc[df['group']=="nonrept_positions",'group'] = "Retail"
-
+    df_analysis.loc[df['group']=="nonrept_positions",'group'] = "Non-Reportable"
     return df_analysis
 
 def analyze_positions(cot_data):
@@ -82,11 +81,11 @@ def analyze_positions(cot_data):
     commercial_long = cot_data.loc[(cot_data['group'] == 'Commercial'), 'latest_long_pct'].sum()
     commercial_short = cot_data.loc[(cot_data['group'] == 'Commercial'), 'latest_short_pct'].sum()
     
-    non_reportable_long = cot_data.loc[(cot_data['group'] == 'Retail'), 'latest_long_pct'].sum()
-    non_reportable_short = cot_data.loc[(cot_data['group'] == 'Retail'), 'latest_short_pct'].sum()
+    non_reportable_long = cot_data.loc[(cot_data['group'] == 'Non-Reportable'), 'latest_long_pct'].sum()
+    non_reportable_short = cot_data.loc[(cot_data['group'] == 'Non-Reportable'), 'latest_short_pct'].sum()
 
     data = {
-        'Trader Group': ['Non-Commercial','Commercial', 'Retail'],
+        'Trader Group': ['Non-Commercial', 'Commercial', 'Non-Reportable'],
         'Long': [non_commercial_long, commercial_long, non_reportable_long],
         'Short': [non_commercial_short, commercial_short, non_reportable_short]
     }
