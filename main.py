@@ -7,9 +7,9 @@ from datetime import datetime
 
 # For demo purposes, we'll include mock implementations of your modules
 # In your actual code, you would import these from separate files
-# from data_fetcher import get_last_two_reports
-# from analysis import aggregate_report_data, analyze_change, analyze_positions
-# from feedback_form import render_feature_form
+from data_fetcher import get_last_two_reports
+from analysis import aggregate_report_data, analyze_change, analyze_positions
+from feedback_form import render_feature_form
 
 # Mock implementations for demo purposes
 def get_last_two_reports(client):
