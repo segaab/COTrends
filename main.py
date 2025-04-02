@@ -198,13 +198,6 @@ def init_client():
 
 client = init_client()
 
-# Setup Streamlit page
-st.set_page_config(
-    layout="wide",
-    page_title="COTrend Analysis",
-    page_icon="📊"
-)
-
 # Add custom CSS for styling
 st.markdown("""
     <style>
