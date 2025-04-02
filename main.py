@@ -5,6 +5,13 @@ import streamlit.components.v1 as components
 from sodapy import Socrata
 from datetime import datetime
 
+# THIS MUST BE THE FIRST STREAMLIT COMMAND
+st.set_page_config(
+    layout="wide",
+    page_title="COTrend Analysis",
+    page_icon="📊"
+)
+
 # For demo purposes, we'll include mock implementations of your modules
 # In your actual code, you would import these from separate files
 from data_fetcher import get_last_two_reports
