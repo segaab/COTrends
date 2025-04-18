@@ -121,51 +121,51 @@ def analyze_change(df):
 def analyze_positions(df):
     """
     Analyzes current positions for each trader group.
+    Returns a DataFrame with the percentage of long and short positions.
     """
     if df.empty:
         print("Warning: No data available for position analysis")
         return pd.DataFrame()
         
     # Get the latest report
-    latest = df.iloc[-1]
+    latest = df.sort_values('report_date_as_yyyy_mm_dd').iloc[-1]
     
-    def calculate_percentage(long_pos, short_pos):
+    def calculate_percentages(long_val, short_val):
+        """Calculate percentage of long and short positions"""
         try:
-            total = long_pos + short_pos
-            return (long_pos / total * 100) if total > 0 else 0
-        except (TypeError, ZeroDivisionError):
-            return 0
+            total = int(long_val) + int(short_val)
+            if total > 0:
+                return {
+                    'Long (%)': (int(long_val) / total) * 100,
+                    'Short (%)': (int(short_val) / total) * 100
+                }
+            return {'Long (%)': 0, 'Short (%)': 0}
+        except (ValueError, TypeError):
+            return {'Long (%)': 0, 'Short (%)': 0}
     
-    # Create position data with error handling
-    position_data = {
-        'Long (%)': [
-            calculate_percentage(
-                latest.get('noncomm_positions_long_all', 0),
-                latest.get('noncomm_positions_short_all', 0)
-            ),
-            calculate_percentage(
-                latest.get('comm_positions_long_all', 0),
-                latest.get('comm_positions_short_all', 0)
-            ),
-            calculate_percentage(
-                latest.get('nonrept_positions_long_all', 0),
-                latest.get('nonrept_positions_short_all', 0)
-            )
-        ],
-        'Short (%)': [
-            calculate_percentage(
-                latest.get('noncomm_positions_short_all', 0),
-                latest.get('noncomm_positions_long_all', 0)
-            ),
-            calculate_percentage(
-                latest.get('comm_positions_short_all', 0),
-                latest.get('comm_positions_long_all', 0)
-            ),
-            calculate_percentage(
-                latest.get('nonrept_positions_short_all', 0),
-                latest.get('nonrept_positions_long_all', 0)
-            )
-        ]
+    # Calculate percentages for each trader group
+    trader_groups = {
+        'Non-Commercial': calculate_percentages(
+            latest['noncomm_positions_long_all'],
+            latest['noncomm_positions_short_all']
+        ),
+        'Commercial': calculate_percentages(
+            latest['comm_positions_long_all'],
+            latest['comm_positions_short_all']
+        ),
+        'Non-Reportable': calculate_percentages(
+            latest['nonrept_positions_long_all'],
+            latest['nonrept_positions_short_all']
+        )
     }
     
-    return pd.DataFrame(position_data, index=['Non-Commercial', 'Commercial', 'Non-Reportable']) 
+    # Create DataFrame with proper structure for bar chart
+    df_data = {
+        'Long (%)': [trader_groups[group]['Long (%)'] for group in trader_groups],
+        'Short (%)': [trader_groups[group]['Short (%)'] for group in trader_groups]
+    }
+    
+    return pd.DataFrame(
+        df_data,
+        index=['Non-Commercial', 'Commercial', 'Non-Reportable']
+    ) 

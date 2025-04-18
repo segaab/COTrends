@@ -40,7 +40,7 @@ def render_asset_section(assets, section_title):
                 
                 # Analyze changes and positions
                 analytics_df = analyze_change(asset_data)
-                position_data = analyze_positions(analytics_df)
+                position_data = analyze_positions(asset_data)
 
                 # Display the data
                 _col = st.columns(2)
@@ -57,7 +57,8 @@ def render_asset_section(assets, section_title):
                     # Show net change percentages with proper formatting
                     st.table(display_df)
                 with _col[1]:
-                    # Show position chart
+                    # Show position chart with title
+                    st.write("Current Positions")
                     st.bar_chart(
                         position_data,
                         color=["#FFFFFF", "#808080"],  # White for Long, Gray for Short
@@ -123,7 +124,6 @@ def kofi_button():
 # Complete asset lists by categories with all instruments
 crypto = [
     "BITCOIN - CHICAGO MERCANTILE EXCHANGE",
-    "ETHER - CHICAGO MERCANTILE EXCHANGE",
     "MICRO BITCOIN - CHICAGO MERCANTILE EXCHANGE",
     "MICRO ETHER - CHICAGO MERCANTILE EXCHANGE"
 ]
