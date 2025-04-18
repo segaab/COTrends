@@ -18,20 +18,27 @@ from data_fetcher import get_last_two_reports
 from analysis import aggregate_report_data, analyze_change, analyze_positions
 from feedback_form import render_feature_form
 
-def render_asset_section(assets, section_title):
+# Cache for the report data
+@st.cache_data(ttl=3600)  # Cache for 1 hour
+def fetch_cot_data(_client):  # Added underscore to tell Streamlit not to hash this parameter
+    """Fetch and cache COT report data"""
+    raw_data = get_last_two_reports(_client)
+    if not raw_data:
+        st.error("Failed to fetch COT report data")
+    return raw_data
+
+def render_asset_section(assets, section_title, raw_data):
     """Helper function to render asset sections consistently"""
     st.markdown(f'<h2 class="section-header">{section_title}</h2>', unsafe_allow_html=True)
+    
+    if not raw_data:
+        st.error("No data available. Please try again later.")
+        return
     
     for asset in assets:
         short_asset = asset.split(" -")[0]
         with st.expander(short_asset):
             try:
-                # Get the raw data from the API
-                raw_data = get_last_two_reports(client)
-                if not raw_data:
-                    st.warning(f"No data available for {asset}")
-                    continue
-                
                 # Process the data using functions from analysis.py
                 asset_data = aggregate_report_data(raw_data, asset)
                 if asset_data.empty:
@@ -178,7 +185,12 @@ def init_client():
         st.error(f"Failed to initialize Socrata client: {str(e)}")
         return None
 
+# Initialize client and fetch data once
 client = init_client()
+if client:
+    raw_data = fetch_cot_data(client)
+else:
+    raw_data = None
 
 # Add custom CSS for styling
 st.markdown("""
@@ -255,13 +267,13 @@ col1, col2 = st.columns(2)
 
 # Display Crypto and Forex data
 with col1:
-    render_asset_section(crypto, "Crypto")
-    render_asset_section(forex, "Forex")
+    render_asset_section(crypto, "Crypto", raw_data)
+    render_asset_section(forex, "Forex", raw_data)
 
 # Display Commodities and Indices data
 with col2:
-    render_asset_section(commodities, "Commodities")
-    render_asset_section(indices, "Indices")
+    render_asset_section(commodities, "Commodities", raw_data)
+    render_asset_section(indices, "Indices", raw_data)
 
 # Add Feature Request Form
 st.markdown("<div style='margin-top: 3rem;'></div>", unsafe_allow_html=True)
@@ -274,10 +286,13 @@ st.markdown("""
     </div>
     """.format(datetime.now().strftime("%Y-%m-%d")), unsafe_allow_html=True)
 
-# Debug information (can be removed in production)
+# Add report dates to debug info
 with st.expander("Debug Info", expanded=False):
     st.write("Environment Variables:", {k: v for k, v in os.environ.items() if "TOKEN" not in k})
     st.write("Current Directory:", os.getcwd())
     st.write("Files in Directory:", os.listdir())
     if 'client' in locals():
         st.write("Socrata Client:", "Initialized" if client else "Not Initialized")
+    if raw_data:
+        dates = {r['report_date_as_yyyy_mm_dd'] for r in raw_data}
+        st.write("Report Dates:", sorted(list(dates)))
