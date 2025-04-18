@@ -3,96 +3,169 @@ from data_fetcher import filter_results
 
 def aggregate_report_data(data, asset_name=None):
     """
-    Aggregates and nests rows of data from both reports under corresponding market names.
+    Aggregates data for a specific asset from both reports.
     """
-    filtered_market_names = filter_results(data, asset_name)
-
-    aggregated_data = []
-    for item in data:
-        if item['market_and_exchange_names'] in filtered_market_names:
-            aggregated_data.append({
-                'market_and_exchange_names': item['market_and_exchange_names'],
-                'latest_report': item['latest_report'],
-                'previous_report': item['previous_report']
-            })
-
-    return pd.DataFrame(aggregated_data)
-
-def analyze_change(aggregated_data):
-    """
-    Analyzes position changes and percentages for different trader groups.
-    """
-    analysis_results = []
-
-    for _, row in aggregated_data.iterrows():
-        market_name = row['market_and_exchange_names']
-        latest_report = row['latest_report']
-        previous_report = row['previous_report']
-
-        if not latest_report or not previous_report:
-            continue
-
-        for group in ['noncomm_positions', 'comm_positions', 'nonrept_positions']:
-            # Calculate positions and percentages
-            latest_long = float(latest_report[f'{group}_long_all'])
-            latest_short = float(latest_report[f'{group}_short_all'])
-            total_latest = latest_long + latest_short
-
-            previous_long = float(previous_report[f'{group}_long_all'])
-            previous_short = float(previous_report[f'{group}_short_all'])
-            total_previous = previous_long + previous_short
-
-            # Calculate percentages and changes
-            latest_long_pct = (latest_long / total_latest) * 100 if total_latest > 0 else 0
-            latest_short_pct = (latest_short / total_latest) * 100 if total_latest > 0 else 0
-            previous_long_pct = (previous_long / total_previous) * 100 if total_previous > 0 else 0
-            previous_short_pct = (previous_short / total_previous) * 100 if total_previous > 0 else 0
-
-            latest_net_pct = latest_long_pct - latest_short_pct
-            previous_net_pct = previous_long_pct - previous_short_pct
-            change_in_net_pct = latest_net_pct - previous_net_pct
-
-            analysis_results.append({
-                'market_and_exchange_names': market_name,
-                'group': group,
-                'latest_long_pct': latest_long_pct,
-                'latest_short_pct': latest_short_pct,
-                'previous_long_pct': previous_long_pct,
-                'previous_short_pct': previous_short_pct,
-                'latest_net_pct': latest_net_pct,
-                'previous_net_pct': previous_net_pct,
-                'change_in_net_pct': change_in_net_pct
-            })
-
-    df = pd.DataFrame(analysis_results)
-    df_analysis = df.copy()
-    df_analysis.loc[df['group']=="noncomm_positions",'group'] = "Non-Commercial"
-    df_analysis.loc[df['group']=="comm_positions",'group'] = "Commercial"
-    df_analysis.loc[df['group']=="nonrept_positions",'group'] = "Non-Reportable"
-    return df_analysis
-
-def analyze_positions(cot_data):
-    """
-    Analyzes positions by trader group and returns normalized position data.
-    """
-    non_commercial_long = cot_data.loc[(cot_data['group'] == 'Non-Commercial'), 'latest_long_pct'].sum()
-    non_commercial_short = cot_data.loc[(cot_data['group'] == 'Non-Commercial'), 'latest_short_pct'].sum()
+    if not data:
+        return pd.DataFrame()
+        
+    # Filter data for the specific asset if provided
+    if asset_name:
+        filtered_data = [item for item in data if item["market_and_exchange_names"] == asset_name]
+    else:
+        filtered_data = data
+        
+    if not filtered_data:
+        return pd.DataFrame()
+        
+    # Convert to DataFrame
+    df = pd.DataFrame(filtered_data)
     
-    commercial_long = cot_data.loc[(cot_data['group'] == 'Commercial'), 'latest_long_pct'].sum()
-    commercial_short = cot_data.loc[(cot_data['group'] == 'Commercial'), 'latest_short_pct'].sum()
+    # Print column names for debugging
+    print(f"Available columns for {asset_name}: {df.columns.tolist()}")
     
-    non_reportable_long = cot_data.loc[(cot_data['group'] == 'Non-Reportable'), 'latest_long_pct'].sum()
-    non_reportable_short = cot_data.loc[(cot_data['group'] == 'Non-Reportable'), 'latest_short_pct'].sum()
-
-    data = {
-        'Trader Group': ['Non-Commercial', 'Commercial', 'Non-Reportable'],
-        'Long': [non_commercial_long, commercial_long, non_reportable_long],
-        'Short': [non_commercial_short, commercial_short, non_reportable_short]
+    # Define the expected column mappings
+    column_mappings = {
+        'noncomm_positions_long_all': ['noncomm_positions_long_all', 'noncomm_long_all', 'noncomm_long'],
+        'noncomm_positions_short_all': ['noncomm_positions_short_all', 'noncomm_short_all', 'noncomm_short'],
+        'comm_positions_long_all': ['comm_positions_long_all', 'comm_long_all', 'comm_long'],
+        'comm_positions_short_all': ['comm_positions_short_all', 'comm_short_all', 'comm_short'],
+        'nonrept_positions_long_all': ['nonrept_positions_long_all', 'nonrept_long_all', 'nonrept_long'],
+        'nonrept_positions_short_all': ['nonrept_positions_short_all', 'nonrept_short_all', 'nonrept_short']
     }
-
-    position_df = pd.DataFrame(data)
-    position_df['Total'] = position_df['Long'] + position_df['Short']
-    position_df['Long (%)'] = (position_df['Long'] / position_df['Total']) * 100
-    position_df['Short (%)'] = (position_df['Short'] / position_df['Total']) * 100
     
-    return position_df[['Trader Group', 'Long (%)', 'Short (%)']].set_index('Trader Group') 
+    # Find the actual column names in the DataFrame
+    actual_columns = {}
+    for target_col, possible_names in column_mappings.items():
+        for name in possible_names:
+            if name in df.columns:
+                actual_columns[target_col] = name
+                break
+    
+    # If we couldn't find any of the required columns, return empty DataFrame
+    if not actual_columns:
+        print(f"Warning: No matching columns found for {asset_name}")
+        return pd.DataFrame()
+    
+    # Convert string values to numeric where appropriate
+    for target_col, actual_col in actual_columns.items():
+        if actual_col in df.columns:
+            df[target_col] = pd.to_numeric(df[actual_col], errors='coerce')
+    
+    # Ensure we have at least one report
+    if len(df) < 1:
+        print(f"Warning: No reports found for {asset_name}")
+        return pd.DataFrame()
+    
+    return df
+
+def analyze_change(df):
+    """
+    Analyzes position changes between reports for different trader groups.
+    The formula calculates the change in net position ratios:
+    ((current_long - current_short) ÷ total_current) - ((previous_long - previous_short) ÷ total_previous)
+    """
+    if df.empty or len(df) < 2:
+        print("Warning: Not enough data for change analysis")
+        return pd.DataFrame({
+            'group': ['Non-Commercial', 'Commercial', 'Non-Reportable'],
+            'change_in_net_pct': [0, 0, 0]
+        })
+    
+    # Sort by date to ensure correct order
+    df = df.sort_values('report_date_as_yyyy_mm_dd')
+    
+    # Get the latest and previous reports
+    latest = df.iloc[-1]
+    previous = df.iloc[-2]
+    
+    def calculate_net_change(latest_long, latest_short, prev_long, prev_short):
+        """Calculate net change using the ratio formula"""
+        # Calculate total positions for each period
+        latest_total = latest_long + latest_short
+        prev_total = prev_long + prev_short
+        
+        # Calculate the ratios
+        latest_ratio = (latest_long - latest_short) / latest_total if latest_total != 0 else 0
+        prev_ratio = (prev_long - prev_short) / prev_total if prev_total != 0 else 0
+        
+        # Calculate the difference in ratios and convert to percentage
+        return (latest_ratio - prev_ratio) * 100
+    
+    # Calculate changes for each trader group
+    changes = {
+        'Non-Commercial': calculate_net_change(
+            latest['noncomm_positions_long_all'],
+            latest['noncomm_positions_short_all'],
+            previous['noncomm_positions_long_all'],
+            previous['noncomm_positions_short_all']
+        ),
+        'Commercial': calculate_net_change(
+            latest['comm_positions_long_all'],
+            latest['comm_positions_short_all'],
+            previous['comm_positions_long_all'],
+            previous['comm_positions_short_all']
+        ),
+        'Non-Reportable': calculate_net_change(
+            latest['nonrept_positions_long_all'],
+            latest['nonrept_positions_short_all'],
+            previous['nonrept_positions_long_all'],
+            previous['nonrept_positions_short_all']
+        )
+    }
+    
+    return pd.DataFrame({
+        'group': list(changes.keys()),
+        'change_in_net_pct': list(changes.values())
+    })
+
+def analyze_positions(df):
+    """
+    Analyzes current positions for each trader group.
+    """
+    if df.empty:
+        print("Warning: No data available for position analysis")
+        return pd.DataFrame()
+        
+    # Get the latest report
+    latest = df.iloc[-1]
+    
+    def calculate_percentage(long_pos, short_pos):
+        try:
+            total = long_pos + short_pos
+            return (long_pos / total * 100) if total > 0 else 0
+        except (TypeError, ZeroDivisionError):
+            return 0
+    
+    # Create position data with error handling
+    position_data = {
+        'Long (%)': [
+            calculate_percentage(
+                latest.get('noncomm_positions_long_all', 0),
+                latest.get('noncomm_positions_short_all', 0)
+            ),
+            calculate_percentage(
+                latest.get('comm_positions_long_all', 0),
+                latest.get('comm_positions_short_all', 0)
+            ),
+            calculate_percentage(
+                latest.get('nonrept_positions_long_all', 0),
+                latest.get('nonrept_positions_short_all', 0)
+            )
+        ],
+        'Short (%)': [
+            calculate_percentage(
+                latest.get('noncomm_positions_short_all', 0),
+                latest.get('noncomm_positions_long_all', 0)
+            ),
+            calculate_percentage(
+                latest.get('comm_positions_short_all', 0),
+                latest.get('comm_positions_long_all', 0)
+            ),
+            calculate_percentage(
+                latest.get('nonrept_positions_short_all', 0),
+                latest.get('nonrept_positions_long_all', 0)
+            )
+        ]
+    }
+    
+    return pd.DataFrame(position_data, index=['Non-Commercial', 'Commercial', 'Non-Reportable']) 

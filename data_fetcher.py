@@ -13,6 +13,10 @@ def get_last_two_reports(client):
     Returns:
     list: List of dictionaries containing the latest and previous report data
     """
+    if not client:
+        print("Error: No Socrata client available")
+        return []
+        
     try:
         edt_now = datetime.utcnow() - timedelta(hours=4)
         
@@ -41,74 +45,66 @@ def get_last_two_reports(client):
         
         print(f"Fetching data for dates: {latest_tuesday_str} and {previous_tuesday_str}")
 
-        # Retrieve the latest and previous reports
-        latest_result = client.get("6dca-aqww", where=f"report_date_as_yyyy_mm_dd = '{latest_tuesday_str}'")
-        previous_result = client.get("6dca-aqww", where=f"report_date_as_yyyy_mm_dd = '{previous_tuesday_str}'")
-
-        if not latest_result or not previous_result:
-            print("Warning: No data received for one or both dates")
-            return []
-
-        # Convert the results to DataFrames
-        latest_df = pd.DataFrame.from_records(latest_result)
-        previous_df = pd.DataFrame.from_records(previous_result)
-
-        # Debug prints
-        print("Latest DataFrame columns:", latest_df.columns.tolist() if not latest_df.empty else "Empty DataFrame")
-        print("Previous DataFrame columns:", previous_df.columns.tolist() if not previous_df.empty else "Empty DataFrame")
-        print("Latest DataFrame shape:", latest_df.shape)
-        print("Previous DataFrame shape:", previous_df.shape)
-
-        # Print some sample market names
-        print("\nSample market names from latest data:")
-        print(latest_df['market_and_exchange_names'].head().tolist())
-        print("\nSample market names from previous data:")
-        print(previous_df['market_and_exchange_names'].head().tolist())
-
-        # Ensure we have the required columns
-        required_columns = [
-            'market_and_exchange_names',
-            'open_interest_all',
-            'noncomm_positions_long_all',
-            'noncomm_positions_short_all',
-            'noncomm_postions_spread_all',
-            'comm_positions_long_all',
-            'comm_positions_short_all',
-            'tot_rept_positions_long_all',
-            'tot_rept_positions_short',
-            'nonrept_positions_long_all',
-            'nonrept_positions_short_all'
+        # Define required fields
+        required_fields = [
+            "market_and_exchange_names",
+            "report_date_as_yyyy_mm_dd",
+            "noncomm_positions_long_all",
+            "noncomm_positions_short_all",
+            "comm_positions_long_all",
+            "comm_positions_short_all",
+            "nonrept_positions_long_all",
+            "nonrept_positions_short_all"
         ]
 
-        missing_columns = [col for col in required_columns if col not in latest_df.columns or col not in previous_df.columns]
-        if missing_columns:
-            print(f"Error: Missing required columns: {missing_columns}")
+        # Retrieve the latest and previous reports using the correct endpoint
+        try:
+            # Build the select query to get only required fields
+            select_query = ",".join(required_fields)
+            
+            latest_result = client.get(
+                "6dca-aqww",
+                where=f"report_date_as_yyyy_mm_dd = '{latest_tuesday_str}'",
+                select=select_query
+            )
+            
+            previous_result = client.get(
+                "6dca-aqww",
+                where=f"report_date_as_yyyy_mm_dd = '{previous_tuesday_str}'",
+                select=select_query
+            )
+            
+            if not latest_result:
+                print(f"Warning: No data received for latest date: {latest_tuesday_str}")
+            if not previous_result:
+                print(f"Warning: No data received for previous date: {previous_tuesday_str}")
+                
+            if not latest_result and not previous_result:
+                print("Error: No data received for either date")
+                return []
+                
+            # Combine results if we have data for at least one date
+            results = []
+            if latest_result:
+                results.extend(latest_result)
+            if previous_result:
+                results.extend(previous_result)
+                
+            # Validate the data structure
+            for item in results:
+                for field in required_fields:
+                    if field not in item:
+                        print(f"Warning: Missing field {field} in data")
+                        item[field] = "0"  # Default to 0 if field is missing
+                
+            return results
+            
+        except Exception as e:
+            print(f"Error fetching data from CFTC API: {str(e)}")
             return []
-
-        # Create final data structure
-        final_data = []
-        for market_name in set(latest_df['market_and_exchange_names']).union(set(previous_df['market_and_exchange_names'])):
-            latest_row = latest_df[latest_df['market_and_exchange_names'] == market_name]
-            previous_row = previous_df[previous_df['market_and_exchange_names'] == market_name]
             
-            latest_report = latest_row[required_columns].iloc[0].to_dict() if not latest_row.empty else None
-            previous_report = previous_row[required_columns].iloc[0].to_dict() if not previous_row.empty else None
-            
-            if latest_report:
-                latest_report.pop('market_and_exchange_names', None)
-            if previous_report:
-                previous_report.pop('market_and_exchange_names', None)
-            
-            final_data.append({
-                'market_and_exchange_names': market_name,
-                'latest_report': latest_report,
-                'previous_report': previous_report
-            })
-
-        return final_data
-
     except Exception as e:
-        print(f"Error fetching data: {str(e)}")
+        print(f"Error in date calculation or data fetching: {str(e)}")
         return []
 
 def asset_name_filter(data, asset_name=None):

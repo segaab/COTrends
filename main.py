@@ -4,6 +4,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from sodapy import Socrata
 from datetime import datetime
+import pandas as pd
 
 # THIS MUST BE THE FIRST STREAMLIT COMMAND
 st.set_page_config(
@@ -12,86 +13,58 @@ st.set_page_config(
     page_icon="📊"
 )
 
-# For demo purposes, we'll include mock implementations of your modules
-# In your actual code, you would import these from separate files
+# Import the actual implementations from their respective files
 from data_fetcher import get_last_two_reports
 from analysis import aggregate_report_data, analyze_change, analyze_positions
 from feedback_form import render_feature_form
 
-# Mock implementations for demo purposes
-def get_last_two_reports(client):
-    # This would normally fetch from the CFTC API
-    # For demo, we return mock data for all instruments
-    return [
-        # Crypto instruments
-        {"market_and_exchange_names": "BITCOIN - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "1000", "noncomm_positions_short_all": "500", "comm_positions_long_all": "800", "comm_positions_short_all": "600"},
-        {"market_and_exchange_names": "BITCOIN - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-08", "noncomm_positions_long_all": "1200", "noncomm_positions_short_all": "400", "comm_positions_long_all": "900", "comm_positions_short_all": "700"},
-        {"market_and_exchange_names": "ETHER - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "800", "noncomm_positions_short_all": "400", "comm_positions_long_all": "600", "comm_positions_short_all": "500"},
-        {"market_and_exchange_names": "MICRO BITCOIN - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "500", "noncomm_positions_short_all": "250", "comm_positions_long_all": "400", "comm_positions_short_all": "300"},
-        {"market_and_exchange_names": "MICRO ETHER - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "400", "noncomm_positions_short_all": "200", "comm_positions_long_all": "300", "comm_positions_short_all": "250"},
-        
-        # Commodity instruments
-        {"market_and_exchange_names": "GOLD - COMMODITY EXCHANGE INC.", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "2000", "noncomm_positions_short_all": "1000", "comm_positions_long_all": "1500", "comm_positions_short_all": "1200"},
-        {"market_and_exchange_names": "SILVER - COMMODITY EXCHANGE INC.", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "1500", "noncomm_positions_short_all": "750", "comm_positions_long_all": "1200", "comm_positions_short_all": "900"},
-        {"market_and_exchange_names": "WTI-FINANCIAL - NEW YORK MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "3000", "noncomm_positions_short_all": "1500", "comm_positions_long_all": "2500", "comm_positions_short_all": "2000"},
-        
-        # Forex instruments
-        {"market_and_exchange_names": "JAPANESE YEN - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "2500", "noncomm_positions_short_all": "1250", "comm_positions_long_all": "2000", "comm_positions_short_all": "1600"},
-        {"market_and_exchange_names": "AUSTRALIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "1800", "noncomm_positions_short_all": "900", "comm_positions_long_all": "1500", "comm_positions_short_all": "1200"},
-        {"market_and_exchange_names": "CANADIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "2000", "noncomm_positions_short_all": "1000", "comm_positions_long_all": "1700", "comm_positions_short_all": "1300"},
-        {"market_and_exchange_names": "BRITISH POUND STERLING - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "2200", "noncomm_positions_short_all": "1100", "comm_positions_long_all": "1800", "comm_positions_short_all": "1400"},
-        {"market_and_exchange_names": "EURO FX - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "3000", "noncomm_positions_short_all": "1500", "comm_positions_long_all": "2500", "comm_positions_short_all": "2000"},
-        {"market_and_exchange_names": "U.S. DOLLAR INDEX - ICE FUTURES U.S.", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "2800", "noncomm_positions_short_all": "1400", "comm_positions_long_all": "2300", "comm_positions_short_all": "1800"},
-        {"market_and_exchange_names": "NEW ZEALAND DOLLAR - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "1200", "noncomm_positions_short_all": "600", "comm_positions_long_all": "1000", "comm_positions_short_all": "800"},
-        {"market_and_exchange_names": "SWISS FRANC - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "1500", "noncomm_positions_short_all": "750", "comm_positions_long_all": "1300", "comm_positions_short_all": "1000"},
-        
-        # Index instruments
-        {"market_and_exchange_names": "DOW JONES REIT - CHICAGO BOARD OF TRADE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "1000", "noncomm_positions_short_all": "500", "comm_positions_long_all": "800", "comm_positions_short_all": "600"},
-        {"market_and_exchange_names": "E-MINI S&P 500 STOCK INDEX - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "5000", "noncomm_positions_short_all": "2500", "comm_positions_long_all": "4000", "comm_positions_short_all": "3000"},
-        {"market_and_exchange_names": "NASDAQ-100 STOCK INDEX (MINI) - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "4000", "noncomm_positions_short_all": "2000", "comm_positions_long_all": "3500", "comm_positions_short_all": "2800"},
-        {"market_and_exchange_names": "NIKKEI STOCK AVERAGE - CHICAGO MERCANTILE EXCHANGE", "report_date_as_yyyy_mm_dd": "2023-01-01", "noncomm_positions_long_all": "1500", "noncomm_positions_short_all": "750", "comm_positions_long_all": "1200", "comm_positions_short_all": "900"}
-    ]
-
-def aggregate_report_data(cot_data, asset):
-    # Filter data for the specific asset
-    return [d for d in cot_data if d["market_and_exchange_names"] == asset]
-
-def analyze_change(asset_data):
-    # Calculate percentage changes between reports
-    if len(asset_data) < 2:
-        return {
-            "group": ["Non-Commercial", "Commercial"],
-            "change_in_net_pct": [0, 0]
-        }
+def render_asset_section(assets, section_title):
+    """Helper function to render asset sections consistently"""
+    st.markdown(f'<h2 class="section-header">{section_title}</h2>', unsafe_allow_html=True)
     
-    # Calculate net positions and changes
-    noncomm_net1 = int(asset_data[0]["noncomm_positions_long_all"]) - int(asset_data[0]["noncomm_positions_short_all"])
-    noncomm_net2 = int(asset_data[1]["noncomm_positions_long_all"]) - int(asset_data[1]["noncomm_positions_short_all"])
-    noncomm_change = ((noncomm_net2 - noncomm_net1) / noncomm_net1 * 100) if noncomm_net1 != 0 else 0
-    
-    comm_net1 = int(asset_data[0]["comm_positions_long_all"]) - int(asset_data[0]["comm_positions_short_all"])
-    comm_net2 = int(asset_data[1]["comm_positions_long_all"]) - int(asset_data[1]["comm_positions_short_all"])
-    comm_change = ((comm_net2 - comm_net1) / comm_net1 * 100) if comm_net1 != 0 else 0
-    
-    return {
-        "group": ["Non-Commercial", "Commercial"],
-        "change_in_net_pct": [noncomm_change, comm_change]
-    }
+    for asset in assets:
+        short_asset = asset.split(" -")[0]
+        with st.expander(short_asset):
+            try:
+                # Get the raw data from the API
+                raw_data = get_last_two_reports(client)
+                if not raw_data:
+                    st.warning(f"No data available for {asset}")
+                    continue
+                
+                # Process the data using functions from analysis.py
+                asset_data = aggregate_report_data(raw_data, asset)
+                if asset_data.empty:
+                    st.warning(f"No data available for {asset}")
+                    continue
+                
+                # Analyze changes and positions
+                analytics_df = analyze_change(asset_data)
+                position_data = analyze_positions(analytics_df)
 
-def analyze_positions(analytics_df):
-    # Prepare data for visualization
-    return {
-        "Non-Commercial": [100, 100 + analytics_df["change_in_net_pct"][0]],
-        "Commercial": [100, 100 + analytics_df["change_in_net_pct"][1]]
-    }
-
-def render_feature_form():
-    with st.form("feature_request"):
-        st.write("Suggest a new feature:")
-        feature = st.text_area("Describe your feature request")
-        submitted = st.form_submit_button("Submit")
-        if submitted:
-            st.success("Thank you for your feedback!")
+                # Display the data
+                _col = st.columns(2)
+                with _col[0]:
+                    # Format the analytics DataFrame for display
+                    display_df = analytics_df.copy()
+                    display_df['Net Change %'] = display_df['change_in_net_pct'].apply(
+                        lambda x: f"{x:+.2f}%" if pd.notnull(x) else "N/A"
+                    )
+                    display_df = display_df[['group', 'Net Change %']].rename(
+                        columns={'group': 'Traders'}
+                    )
+                    
+                    # Show net change percentages with proper formatting
+                    st.table(display_df)
+                with _col[1]:
+                    # Show position chart
+                    st.bar_chart(
+                        position_data,
+                        color=["#FFFFFF", "#808080"],  # White for Long, Gray for Short
+                        use_container_width=True
+                    )
+            except Exception as e:
+                st.error(f"Error displaying {asset}: {str(e)}")
 
 # Fixed image handling function
 def get_image_base64(image_path):
@@ -185,13 +158,22 @@ def init_client():
     try:
         MyAppToken = os.getenv('SODAPY_TOKEN')
         if not MyAppToken:
-            st.warning("Running without Socrata API token - using mock data")
+            st.error("Socrata API token not found. Please set SODAPY_TOKEN in your .env file.")
             return None
         
+        # Initialize client with correct domain
         client = Socrata("publicreporting.cftc.gov", MyAppToken, timeout=30)
-        # Test connection with a simple query
-        client.get("publicreporting.cftc.gov", limit=1)
-        return client
+        
+        # Test connection with a simple query to the correct endpoint
+        try:
+            test_result = client.get("6dca-aqww", limit=1000)
+            if not test_result:
+                st.error("Failed to connect to CFTC API. Please check your API token and network connection.")
+                return None
+            return client
+        except Exception as e:
+            st.error(f"Failed to connect to CFTC API: {str(e)}")
+            return None
     except Exception as e:
         st.error(f"Failed to initialize Socrata client: {str(e)}")
         return None
@@ -270,42 +252,6 @@ kofi_button()
 
 # Create two columns for layout
 col1, col2 = st.columns(2)
-
-def render_asset_section(assets, section_title):
-    """Helper function to render asset sections consistently"""
-    st.markdown(f'<h2 class="section-header">{section_title}</h2>', unsafe_allow_html=True)
-    
-    for asset in assets:
-        short_asset = asset.split(" -")[0]
-        with st.expander(short_asset):
-            try:
-                asset_data = aggregate_report_data(get_last_two_reports(client), asset)
-                
-                if not asset_data:
-                    st.warning(f"No data available for {asset}")
-                    continue
-                    
-                analytics_df = analyze_change(asset_data)
-                chart_data = analyze_positions(analytics_df)
-                
-                # Convert to DataFrame
-                import pandas as pd
-                df = pd.DataFrame({
-                    'Traders': analytics_df['group'],
-                    'Net Change %': analytics_df['change_in_net_pct']
-                })
-
-                _col = st.columns(2)
-                with _col[0]:
-                    st.table(df)
-                with _col[1]:
-                    st.bar_chart(
-                        chart_data,
-                        color=["#FFFFFF", "#808080"],
-                        use_container_width=True
-                    )
-            except Exception as e:
-                st.error(f"Error displaying {asset}: {str(e)}")
 
 # Display Crypto and Forex data
 with col1:
