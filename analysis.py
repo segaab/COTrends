@@ -122,6 +122,7 @@ def analyze_positions(df):
     """
     Analyzes current positions for each trader group.
     Returns a DataFrame with the percentage of long and short positions.
+    Long positions will be displayed at the bottom in white.
     """
     if df.empty:
         print("Warning: No data available for position analysis")
@@ -136,8 +137,8 @@ def analyze_positions(df):
             total = int(long_val) + int(short_val)
             if total > 0:
                 return {
-                    'Long (%)': (int(long_val) / total) * 100,
-                    'Short (%)': (int(short_val) / total) * 100
+                    'Long (%)': (int(long_val) / total) * 100,     # Long first (will be bottom)
+                    'Short (%)': (int(short_val) / total) * 100    # Short second (will be top)
                 }
             return {'Long (%)': 0, 'Short (%)': 0}
         except (ValueError, TypeError):
@@ -146,23 +147,23 @@ def analyze_positions(df):
     # Calculate percentages for each trader group
     trader_groups = {
         'Non-Commercial': calculate_percentages(
-            latest['noncomm_positions_long_all'],
-            latest['noncomm_positions_short_all']
+            latest['noncomm_positions_short_all'],
+            latest['noncomm_positions_long_all']
         ),
         'Commercial': calculate_percentages(
-            latest['comm_positions_long_all'],
-            latest['comm_positions_short_all']
+            latest['comm_positions_short_all'],
+            latest['comm_positions_long_all']
         ),
         'Non-Reportable': calculate_percentages(
-            latest['nonrept_positions_long_all'],
-            latest['nonrept_positions_short_all']
+            latest['nonrept_positions_short_all'],
+            latest['nonrept_positions_long_all']
         )
     }
     
     # Create DataFrame with proper structure for bar chart
     df_data = {
-        'Long (%)': [trader_groups[group]['Long (%)'] for group in trader_groups],
-        'Short (%)': [trader_groups[group]['Short (%)'] for group in trader_groups]
+        'Short (%)': [trader_groups[group]['Short (%)'] for group in trader_groups],     # Long first (bottom)
+        'Long (%)': [trader_groups[group]['Long (%)'] for group in trader_groups]    # Short second (top)
     }
     
     return pd.DataFrame(

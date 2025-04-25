@@ -68,7 +68,7 @@ def render_asset_section(assets, section_title, raw_data):
                     st.write("Current Positions")
                     st.bar_chart(
                         position_data,
-                        color=["#FFFFFF", "#808080"],  # White for Long, Gray for Short
+                        color=["#FFFFFF", "#808080"],  # White for Long (bottom), Gray for Short (top)
                         use_container_width=True
                     )
             except Exception as e:
