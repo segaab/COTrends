@@ -18,21 +18,28 @@ def get_last_two_reports(client):
         return []
         
     try:
+        # Get current time in ET
         edt_now = datetime.utcnow() - timedelta(hours=4)
+        current_time = edt_now.time()
+        cutoff_time = datetime.strptime("15:30", "%H:%M").time()
         
-        # Find the most recent Friday (going backwards)
+        print(f"Current time (ET): {edt_now.strftime('%Y-%m-%d %H:%M:%S')}")
+        
+        # Find the most recent Friday for report release
         days_since_friday = (edt_now.weekday() - 4) % 7
         last_friday = edt_now - timedelta(days=days_since_friday)
         
-        # If it's Friday but before 3:30 PM EDT, use the previous Friday
+        # If it's Friday, check if we're before or after 3:30 PM ET
         if edt_now.weekday() == 4:
-            current_time = edt_now.time()
-            cutoff_time = datetime.strptime("15:30", "%H:%M").time()
             if current_time < cutoff_time:
+                print("Before 3:30 PM ET on Friday - using previous week's report")
                 last_friday = last_friday - timedelta(weeks=1)
+            else:
+                print("After 3:30 PM ET on Friday - using this week's report")
         
-        # Go back one more Friday if we're on a weekend
+        # If we're on a weekend, go back to the previous Friday
         if edt_now.weekday() >= 5:
+            print("It's weekend - using previous Friday's report")
             last_friday = last_friday - timedelta(weeks=1)
         
         # The report is for the previous Tuesday
@@ -44,6 +51,7 @@ def get_last_two_reports(client):
         previous_tuesday_str = previous_tuesday.strftime('%Y-%m-%d')
         
         print(f"Fetching data for dates: {latest_tuesday_str} and {previous_tuesday_str}")
+        print(f"Report release time: {last_friday.strftime('%Y-%m-%d')} 15:30 ET")
 
         # Define required fields
         required_fields = [
@@ -128,4 +136,86 @@ def filter_results(data, asset_name=None):
     Returns a list of filtered market names.
     """
     filtered_data = asset_name_filter(data, asset_name)
-    return [item['market_and_exchange_names'] for item in filtered_data] 
+    return [item['market_and_exchange_names'] for item in filtered_data]
+
+def test_date_calculation():
+    """Test the date calculation logic with specific test cases"""
+    test_cases = [
+        # Test case 1: Friday before 3:30 PM ET
+        {
+            'datetime': datetime(2025, 4, 11, 10, 0),  # 10:00 AM ET on Friday
+            'expected_latest': '2025-04-04',  # Previous Friday's report
+            'expected_previous': '2025-03-28'  # Two Fridays ago
+        },
+        # Test case 2: Friday after 3:30 PM ET
+        {
+            'datetime': datetime(2025, 4, 11, 17, 0),  # 5:00 PM ET on Friday
+            'expected_latest': '2025-04-11',  # Current Friday's report
+            'expected_previous': '2025-04-04'  # Previous Friday's report
+        },
+        # Test case 3: Saturday
+        {
+            'datetime': datetime(2025, 4, 12, 10, 0),  # 10:00 AM ET on Saturday
+            'expected_latest': '2025-04-11',  # Friday's report
+            'expected_previous': '2025-04-04'  # Previous Friday's report
+        },
+        # Test case 4: Sunday
+        {
+            'datetime': datetime(2025, 4, 13, 10, 0),  # 10:00 AM ET on Sunday
+            'expected_latest': '2025-04-11',  # Friday's report
+            'expected_previous': '2025-04-04'  # Previous Friday's report
+        },
+        # Test case 5: Monday
+        {
+            'datetime': datetime(2025, 4, 14, 10, 0),  # 10:00 AM ET on Monday
+            'expected_latest': '2025-04-11',  # Friday's report
+            'expected_previous': '2025-04-04'  # Previous Friday's report
+        }
+    ]
+    
+    print("\nTesting Date Calculation Logic")
+    print("=" * 50)
+    
+    for i, test in enumerate(test_cases, 1):
+        print(f"\nTest Case {i}:")
+        print(f"Test datetime: {test['datetime'].strftime('%Y-%m-%d %H:%M ET')}")
+        
+        # Calculate dates using the test datetime
+        current_time = test['datetime'].time()
+        cutoff_time = datetime.strptime("15:30", "%H:%M").time()
+        
+        # Find the most recent Friday for report release
+        days_since_friday = (test['datetime'].weekday() - 4) % 7
+        last_friday = test['datetime'] - timedelta(days=days_since_friday)
+        
+        # If it's Friday, check if we're before or after 3:30 PM ET
+        if test['datetime'].weekday() == 4:
+            if current_time < cutoff_time:
+                print("Before 3:30 PM ET on Friday - using previous week's report")
+                last_friday = last_friday - timedelta(weeks=1)
+            else:
+                print("After 3:30 PM ET on Friday - using this week's report")
+        
+        # Calculate the Tuesday dates (3 days before each Friday)
+        latest_tuesday = last_friday
+        previous_tuesday = last_friday - timedelta(weeks=1)
+        
+        # Format dates
+        latest_tuesday_str = latest_tuesday.strftime('%Y-%m-%d')
+        previous_tuesday_str = previous_tuesday.strftime('%Y-%m-%d')
+        
+        print(f"Calculated latest report date: {latest_tuesday_str}")
+        print(f"Calculated previous report date: {previous_tuesday_str}")
+        print(f"Expected latest report date: {test['expected_latest']}")
+        print(f"Expected previous report date: {test['expected_previous']}")
+        
+        # Verify results
+        if latest_tuesday_str == test['expected_latest'] and previous_tuesday_str == test['expected_previous']:
+            print("✅ Test passed!")
+        else:
+            print("❌ Test failed!")
+            print(f"Latest report mismatch: {latest_tuesday_str} != {test['expected_latest']}")
+            print(f"Previous report mismatch: {previous_tuesday_str} != {test['expected_previous']}")
+
+if __name__ == "__main__":
+    test_date_calculation() 
