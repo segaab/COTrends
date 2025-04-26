@@ -172,15 +172,11 @@ def init_client():
         client = Socrata("publicreporting.cftc.gov", MyAppToken, timeout=30)
         
         # Test connection with a simple query to the correct endpoint
-        try:
-            test_result = client.get("6dca-aqww", limit=1000)
-            if not test_result:
-                st.error("Failed to connect to CFTC API. Please check your API token and network connection.")
-                return None
-            return client
-        except Exception as e:
-            st.error(f"Failed to connect to CFTC API: {str(e)}")
+        test_result = client.get("6dca-aqww", limit=1000)
+        if not test_result:
+            st.error("Failed to connect to CFTC API. Please check your API token and network connection.")
             return None
+        return client
     except Exception as e:
         st.error(f"Failed to initialize Socrata client: {str(e)}")
         return None

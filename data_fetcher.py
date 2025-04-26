@@ -25,7 +25,7 @@ def get_last_two_reports(client):
         
         print(f"Current time (ET): {edt_now.strftime('%Y-%m-%d %H:%M:%S')}")
         
-        # Find the most recent Friday for report release
+        # Find the most recent Friday
         days_since_friday = (edt_now.weekday() - 4) % 7
         last_friday = edt_now - timedelta(days=days_since_friday)
         
@@ -37,10 +37,10 @@ def get_last_two_reports(client):
             else:
                 print("After 3:30 PM ET on Friday - using this week's report")
         
-        # If we're on a weekend, go back to the previous Friday
+        # If we're on a weekend, use this week's Friday report
         if edt_now.weekday() >= 5:
-            print("It's weekend - using previous Friday's report")
-            last_friday = last_friday - timedelta(weeks=1)
+            print("It's weekend - using this week's Friday report")
+            # No need to adjust last_friday as it's already this week's Friday
         
         # The report is for the previous Tuesday
         latest_tuesday = last_friday - timedelta(days=3)
@@ -81,7 +81,7 @@ def get_last_two_reports(client):
                 where=f"report_date_as_yyyy_mm_dd = '{previous_tuesday_str}'",
                 select=select_query
             )
-            
+
             if not latest_result:
                 print(f"Warning: No data received for latest date: {latest_tuesday_str}")
             if not previous_result:
@@ -110,7 +110,7 @@ def get_last_two_reports(client):
         except Exception as e:
             print(f"Error fetching data from CFTC API: {str(e)}")
             return []
-            
+
     except Exception as e:
         print(f"Error in date calculation or data fetching: {str(e)}")
         return []
@@ -136,7 +136,7 @@ def filter_results(data, asset_name=None):
     Returns a list of filtered market names.
     """
     filtered_data = asset_name_filter(data, asset_name)
-    return [item['market_and_exchange_names'] for item in filtered_data]
+    return [item['market_and_exchange_names'] for item in filtered_data] 
 
 def test_date_calculation():
     """Test the date calculation logic with specific test cases"""

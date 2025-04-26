@@ -157,13 +157,15 @@ def analyze_positions(df):
         'Non-Reportable': calculate_percentages(
             latest['nonrept_positions_short_all'],
             latest['nonrept_positions_long_all']
+            
+            
         )
     }
     
     # Create DataFrame with proper structure for bar chart
     df_data = {
-        'Short (%)': [trader_groups[group]['Short (%)'] for group in trader_groups],     # Long first (bottom)
-        'Long (%)': [trader_groups[group]['Long (%)'] for group in trader_groups]    # Short second (top)
+        'Long (%)': [trader_groups[group]['Long (%)'] for group in trader_groups],     # Long first (bottom)
+        'Short (%)': [trader_groups[group]['Short (%)'] for group in trader_groups]    # Short second (top)
     }
     
     return pd.DataFrame(
