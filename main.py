@@ -5,6 +5,7 @@ import streamlit.components.v1 as components
 from sodapy import Socrata
 from datetime import datetime
 import pandas as pd
+import altair as alt
 
 # THIS MUST BE THE FIRST STREAMLIT COMMAND
 st.set_page_config(
@@ -50,27 +51,53 @@ def render_asset_section(assets, section_title, raw_data):
                 position_data = analyze_positions(asset_data)
 
                 # Display the data
-                _col = st.columns(2)
-                with _col[0]:
-                    # Format the analytics DataFrame for display
-                    display_df = analytics_df.copy()
-                    display_df['Net Change %'] = display_df['change_in_net_pct'].apply(
-                        lambda x: f"{x:+.2f}%" if pd.notnull(x) else "N/A"
-                    )
-                    display_df = display_df[['group', 'Net Change %']].rename(
-                        columns={'group': 'Traders'}
-                    )
-                    
-                    # Show net change percentages with proper formatting
-                    st.table(display_df)
-                with _col[1]:
-                    # Show position chart with title
-                    st.write("Current Positions")
-                    st.bar_chart(
-                        position_data,
-                        color=["#FFFFFF", "#808080"],  # White for Long (bottom), Gray for Short (top)
-                        use_container_width=True
-                    )
+                # Remove columns, use vertical layout
+                # Format the analytics DataFrame for display
+                display_df = analytics_df.copy()
+                display_df['Net Change %'] = display_df['change_in_net_pct'].apply(
+                    lambda x: f"{x:+.2f}%" if pd.notnull(x) else "N/A"
+                )
+                display_df = display_df[['group', 'Net Change %']].rename(
+                    columns={'group': 'Traders'}
+                )
+                # Show net change percentages with proper formatting
+                st.table(display_df)
+
+                # Chart below the table, full width
+                st.write("Trader Positions Over Time (Normalized % Long)")
+                chart_df = asset_data.sort_values('report_date_as_yyyy_mm_dd').tail(3)
+                chart_df = chart_df.reset_index(drop=True)
+                week_labels = ['Before LW', 'Last Week', 'This Week']
+                chart_df['Week'] = week_labels[-len(chart_df):]
+                def pct_long(long, short):
+                    total = long + short
+                    return (long / total * 100) if total > 0 else 0
+                smart_money_pct = [pct_long(row['comm_positions_long_all'], row['comm_positions_short_all']) for _, row in chart_df.iterrows()]
+                large_spec_pct = [pct_long(row['noncomm_positions_long_all'], row['noncomm_positions_short_all']) for _, row in chart_df.iterrows()]
+                retail_pct = [pct_long(row['nonrept_positions_long_all'], row['nonrept_positions_short_all']) for _, row in chart_df.iterrows()]
+                plot_df = pd.DataFrame({
+                    'Week': chart_df['Week'],
+                    'Smart Money': smart_money_pct,
+                    'Large Speculators': large_spec_pct,
+                    'Retail': retail_pct
+                })
+                plot_df = plot_df.melt(id_vars=['Week'], var_name='Trader', value_name='Long %')
+                color_scale = alt.Scale(domain=["Smart Money", "Large Speculators", "Retail"],
+                                        range=["#3fa9f5", "#f25c5c", "#ffffff"])
+                line = alt.Chart(plot_df).mark_line(point=alt.OverlayMarkDef(filled=True, size=100)).encode(
+                    x=alt.X('Week', sort=None, axis=alt.Axis(title=None, labelFontSize=16)),
+                    y=alt.Y('Long %', axis=alt.Axis(title="% Long", labelFontSize=16), scale=alt.Scale(domain=[0, 100])),
+                    color=alt.Color('Trader', scale=color_scale, legend=alt.Legend(title="")),
+                    detail='Trader'
+                )
+                points = alt.Chart(plot_df).mark_point(filled=True, size=100).encode(
+                    x='Week',
+                    y='Long %',
+                    color=alt.Color('Trader', scale=color_scale, legend=None),
+                    shape=alt.Shape('Trader', legend=None)
+                )
+                chart = (line + points).properties(height=350, width=600, background="#343333")
+                st.altair_chart(chart, use_container_width=True)
             except Exception as e:
                 st.error(f"Error displaying {asset}: {str(e)}")
 

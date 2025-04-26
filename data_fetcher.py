@@ -5,7 +5,7 @@ from sodapy import Socrata
 
 def get_last_two_reports(client):
     """
-    Fetches the last two COT reports from the CFTC database.
+    Fetches the last three COT reports from the CFTC database.
     
     Parameters:
     client (Socrata): Initialized Socrata client
@@ -45,12 +45,14 @@ def get_last_two_reports(client):
         # The report is for the previous Tuesday
         latest_tuesday = last_friday - timedelta(days=3)
         previous_tuesday = latest_tuesday - timedelta(weeks=1)
+        oldest_tuesday = previous_tuesday - timedelta(weeks=1)
         
         # Format dates as strings
         latest_tuesday_str = latest_tuesday.strftime('%Y-%m-%d')
         previous_tuesday_str = previous_tuesday.strftime('%Y-%m-%d')
+        oldest_tuesday_str = oldest_tuesday.strftime('%Y-%m-%d')
         
-        print(f"Fetching data for dates: {latest_tuesday_str} and {previous_tuesday_str}")
+        print(f"Fetching data for dates: {latest_tuesday_str}, {previous_tuesday_str}, and {oldest_tuesday_str}")
         print(f"Report release time: {last_friday.strftime('%Y-%m-%d')} 15:30 ET")
 
         # Define required fields
@@ -65,7 +67,7 @@ def get_last_two_reports(client):
             "nonrept_positions_short_all"
         ]
 
-        # Retrieve the latest and previous reports using the correct endpoint
+        # Retrieve the reports using the correct endpoint
         try:
             # Build the select query to get only required fields
             select_query = ",".join(required_fields)
@@ -82,13 +84,21 @@ def get_last_two_reports(client):
                 select=select_query
             )
 
+            oldest_result = client.get(
+                "6dca-aqww",
+                where=f"report_date_as_yyyy_mm_dd = '{oldest_tuesday_str}'",
+                select=select_query
+            )
+
             if not latest_result:
                 print(f"Warning: No data received for latest date: {latest_tuesday_str}")
             if not previous_result:
                 print(f"Warning: No data received for previous date: {previous_tuesday_str}")
+            if not oldest_result:
+                print(f"Warning: No data received for oldest date: {oldest_tuesday_str}")
                 
-            if not latest_result and not previous_result:
-                print("Error: No data received for either date")
+            if not latest_result and not previous_result and not oldest_result:
+                print("Error: No data received for any date")
                 return []
                 
             # Combine results if we have data for at least one date
@@ -97,6 +107,8 @@ def get_last_two_reports(client):
                 results.extend(latest_result)
             if previous_result:
                 results.extend(previous_result)
+            if oldest_result:
+                results.extend(oldest_result)
                 
             # Validate the data structure
             for item in results:
