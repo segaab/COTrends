@@ -282,9 +282,6 @@ except Exception as e:
     st.title("COTrend Analysis")
     st.subheader("Find Your Edge in the Commitments of Traders Reports")
 
-# Add Ko-fi button
-kofi_button()
-
 # Create two columns for layout
 col1, col2 = st.columns(2)
 
@@ -298,24 +295,9 @@ with col2:
     render_asset_section(commodities, "Commodities", raw_data)
     render_asset_section(indices, "Indices", raw_data)
 
-# Add Feature Request Form
-st.markdown("<div style='margin-top: 3rem;'></div>", unsafe_allow_html=True)
-render_feature_form()
-
 # Add Footer
 st.markdown("""
     <div class="footer">
         <span class="footer-text">Powered by BiltP2P • Data from CFTC • Last updated: {}</span>
     </div>
     """.format(datetime.now().strftime("%Y-%m-%d")), unsafe_allow_html=True)
-
-# Add report dates to debug info
-with st.expander("Debug Info", expanded=False):
-    st.write("Environment Variables:", {k: v for k, v in os.environ.items() if "TOKEN" not in k})
-    st.write("Current Directory:", os.getcwd())
-    st.write("Files in Directory:", os.listdir())
-    if 'client' in locals():
-        st.write("Socrata Client:", "Initialized" if client else "Not Initialized")
-    if raw_data:
-        dates = {r['report_date_as_yyyy_mm_dd'] for r in raw_data}
-        st.write("Report Dates:", sorted(list(dates)))
