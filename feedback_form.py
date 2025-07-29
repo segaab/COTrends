@@ -11,7 +11,7 @@ import os
 # -------------------------
 load_dotenv()
 FRED_API_KEY = os.getenv("FRED_API_KEY")
-HUGGINGFACE_TOKEN = os.getenv("HF_TOKEN")
+HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
 
 # -------------------------
 # Validate token setup
