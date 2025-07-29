@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 FRED_API_KEY = os.getenv("FRED_API_KEY")
 HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
-HF_MODEL_ID = "deepseek-ai/DeepSeek-R1"
+HF_MODEL_ID = "mistralai/Mistral-7B-Instruct-v0.2"
 HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}"
 
 # ---------------------
