@@ -6,7 +6,7 @@ from yahooquery import Ticker
 # ---------------------
 # Configuration
 # ---------------------
-FRED_API_KEY = 'YOUR_FRED_API_KEY'
+FRED_API_KEY = 'bb26c399cb6892eece681374de6d370e'
 
 st.set_page_config(page_title="Macro Snapshot Dashboard", layout="centered")
 st.title("📌 Macro Snapshot Dashboard")
