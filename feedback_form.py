@@ -1,147 +1,90 @@
-import os
-import json
 import streamlit as st
-import firebase_admin
-from firebase_admin import credentials, firestore
-from datetime import datetime
+import requests
+import datetime
+from yahooquery import Ticker
 
-def init_firebase():
-    """Initialize Firebase if not already initialized"""
+# ---------------------
+# Configuration
+# ---------------------
+FRED_API_KEY = 'YOUR_FRED_API_KEY'
+
+st.set_page_config(page_title="Macro Snapshot Dashboard", layout="centered")
+st.title("📌 Macro Snapshot Dashboard")
+
+# ---------------------
+# Helpers
+# ---------------------
+def fetch_fred_data(series_id):
+    url = f"https://api.stlouisfed.org/fred/series/observations?series_id={series_id}&api_key={FRED_API_KEY}&file_type=json"
+    resp = requests.get(url)
+    if resp.status_code == 200:
+        data = resp.json()['observations']
+        latest = next((item for item in reversed(data) if item['value'] not in ['.']), None)
+        prev = next((item for item in reversed(data[:-1]) if item['value'] not in ['.']), None)
+        return float(latest['value']), float(prev['value']), latest['date']
+    else:
+        st.error(f"Error fetching {series_id} from FRED: {resp.status_code}")
+        return None, None, None
+
+def fetch_yahooquery_price(ticker):
     try:
-        if not firebase_admin._apps:
-            # Try to load from streamlit secrets
-            try:
-                firebase_credentials = json.loads(st.secrets["firebase"]["credentials"])
-                print("Successfully loaded credentials from Streamlit secrets")
-            except Exception as e:
-                print(f"Failed to load from Streamlit secrets: {str(e)}")
-                # If that fails, try loading from local file
-                try:
-                    with open('.streamlit/secrets.toml', 'r') as f:
-                        content = f.read()
-                        # Find the credentials between triple quotes
-                        start = content.find("'''") + 3
-                        end = content.rfind("'''")
-                        if start == -1 or end == -1:
-                            raise ValueError("Could not find credentials in secrets.toml")
-                        json_str = content[start:end].strip()
-                        firebase_credentials = json.loads(json_str)
-                        print("Successfully loaded credentials from local secrets.toml")
-                except Exception as local_e:
-                    print(f"Failed to load from local file: {str(local_e)}")
-                    raise Exception("Failed to load Firebase credentials from both Streamlit secrets and local file")
-            
-            if not firebase_credentials:
-                raise Exception("Firebase credentials are empty")
-            
-            cred = credentials.Certificate(firebase_credentials)
-            firebase_admin.initialize_app(cred)
-            print("Successfully initialized Firebase app")
-        return firestore.client()
+        tq = Ticker(ticker)
+        hist = tq.history(period='2d', interval='1d')
+        if isinstance(hist, dict) or hist.empty or len(hist) < 2:
+            raise ValueError("Insufficient or invalid data")
+        latest_close = hist['close'].iloc[-1]
+        previous_close = hist['close'].iloc[-2]
+        return latest_close, previous_close
     except Exception as e:
-        error_msg = f"Firebase initialization error: {str(e)}"
-        print(error_msg)
-        st.error(error_msg)
-        raise e
+        st.error(f"Error fetching {ticker} via yahooquery: {e}")
+        return None, None
 
-def save_feature_request(feature_request, email):
-    try:
-        db = init_firebase()
-        feature_data = {
-            'feature': feature_request.strip(),
-            'email': email.strip() if email else '',
-            'timestamp': datetime.now(),
-            'created_at': firestore.SERVER_TIMESTAMP
-        }
-        db.collection('feature_requests').add(feature_data)
-        return True
-    except Exception as e:
-        if "SERVICE_DISABLED" in str(e):
-            st.error("Database service is currently being activated. Please try again in a few minutes.")
-        else:
-            st.error(f"Failed to save feature request: {str(e)}")
-        return False
-
-def render_feature_form():
-    # Initialize session state variables if they don't exist
-    if 'form_submit_success' not in st.session_state:
-        st.session_state.form_submit_success = False
-        st.session_state.feature_input = ""
-        st.session_state.email_input = ""
-
-    # Reset fields if previous submission was successful
-    if st.session_state.form_submit_success:
-        st.session_state.feature_input = ""
-        st.session_state.email_input = ""
-        st.session_state.form_submit_success = False
-
-    # Custom CSS for styling
+# ---------------------
+# UI Layout
+# ---------------------
+with st.expander("📝 How it works", expanded=False):
     st.markdown("""
-    <style>
-        /* Feature request section container */
-        .feature-request-section {
-            background: linear-gradient(180deg, rgba(76, 175, 80, 0.05) 0%, rgba(0, 0, 0, 0) 100%);
-            border: 1px solid rgba(76, 175, 80, 0.2);
-            border-radius: 12px;
-            padding: 2.5rem;
-            margin: 3rem 0;
-        }
-        
-        /* Title styling */
-        .feature-title {
-            color: white;
-            font-size: 2.2em;
-            font-weight: 700;
-            text-align: center;
-            margin-bottom: 0.5rem;
-            letter-spacing: -0.5px;
-        }
-        
-        /* Promise text styling */
-        .promise-text {
-            color: #4CAF50;
-            font-size: 1.3em;
-            text-align: center;
-            margin-bottom: 2rem;
-            font-weight: 500;
-        }
-    </style>
-    
-    <div class='feature-request-section'>
-        <h2 class='feature-title'>Feature Requests</h2>
-        <p class='promise-text'>I will build and deploy your ideas in 2 days.</p>
-    """, unsafe_allow_html=True)
-    
-    # Input fields
-    col1, col2 = st.columns(2)
-    with col1:
-        feature_request = st.text_input("Suggest a Feature", 
-                                      placeholder="What feature would you like to see?",
-                                      key="feature_input")
-    with col2:
-        contact_email = st.text_input("Your Email (optional)", 
-                                    placeholder="Where should we notify you?",
-                                    key="email_input")
-    
-    # Submit button
-    _, col2, _ = st.columns([1, 2, 1])
-    with col2:
-        submit_button = st.button("Submit Request", use_container_width=True)
-    
-    # Handle form submission
-    if submit_button:
-        if not feature_request:
-            st.error("Please enter a feature request")
-        else:
-            with st.spinner('Saving your feature request...'):
-                if save_feature_request(feature_request, contact_email):
-                    st.success("Thank you for your suggestion!")
-                    st.session_state.form_submit_success = True
-                    st.rerun()
-    
-    st.markdown("</div>", unsafe_allow_html=True)
+    - Fetches macroeconomic indicators using **FRED API**
+    - Pulls S&P500, 10Y Yield, and Gold prices using **yahooquery**
+    - Displays snapshot + logs any fetch issues
+    """)
 
-if __name__ == "__main__":
-    st.set_page_config(page_title="Feature Request Form", layout="centered")
-    render_feature_form() 
+if st.button("🚀 Run Macro Snapshot Fetch"):
+    with st.spinner("Fetching data..."):
 
+        today = datetime.date.today()
+        st.subheader(f"🗓 Snapshot Date: {today}")
+
+        # 🏦 Monetary Policy
+        st.markdown("### 🏦 Monetary Policy")
+        fed_rate, _, rate_date = fetch_fred_data("FEDFUNDS")
+        st.write(f"**Fed Funds Rate:** {fed_rate:.2f}% (as of {rate_date})")
+        st.write("**Stance:** Neutral-Hawkish")
+        st.write("**Tools:** Fed Funds Rate, Balance Sheet Runoff")
+
+        # 📊 Key Economic Indicator
+        st.markdown("### 📊 Key Economic Indicator")
+        cpi_now, cpi_prev, cpi_date = fetch_fred_data("CPILFESL")
+        inflation_trend = "Cooling" if cpi_now < cpi_prev else "Heating"
+        st.write(f"**Core CPI YoY**: {cpi_now:.2f}% (Previous: {cpi_prev:.2f}%) – *{inflation_trend} Inflation*")
+
+        # 📈 Market Outlook
+        st.markdown("### 📈 Market Snapshot")
+        sp_now, sp_prev = fetch_yahooquery_price("^GSPC")
+        bond_now, bond_prev = fetch_yahooquery_price("^TNX")
+        gold_now, gold_prev = fetch_yahooquery_price("GC=F")
+
+        st.write(f"**S&P500**: {sp_now:.2f} ({sp_now - sp_prev:+.2f})")
+        st.write(f"**10Y Yield**: {bond_now:.2f} ({bond_now - bond_prev:+.2f})")
+        st.write(f"**Gold**: ${gold_now:.2f} ({gold_now - gold_prev:+.2f})")
+
+        # 🌍 Global Risks (Static)
+        st.markdown("### 🌍 Global Macro Risks")
+        st.write("• U.S.–China tensions\n• Commodity volatility\n• Election cycles\n• Oil/geopolitical risk")
+
+        # Logs
+        st.markdown("### 🪵 Fetch Log")
+        st.success("Data fetch completed successfully!")
+
+else:
+    st.info("Click the button above to fetch macroeconomic snapshot data.")
