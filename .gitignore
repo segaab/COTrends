@@ -4,7 +4,6 @@ __pycache__/
 *$py.class
 *.so
 .Python
-env/
 build/
 develop-eggs/
 dist/
@@ -21,7 +20,7 @@ var/
 *.egg
 
 # Environment variables
-.env
+
 .streamlit/secrets.toml
 
 # IDE
