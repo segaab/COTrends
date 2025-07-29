@@ -2,14 +2,24 @@ import streamlit as st
 import requests
 import datetime
 from yahooquery import Ticker
+import os
+from dotenv import load_dotenv
 
 # ---------------------
-# Configuration
+# Load Environment Variables
 # ---------------------
-FRED_API_KEY = 'bb26c399cb6892eece681374de6d370e'
-HUGGINGFACE_TOKEN = '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'
-HF_MODEL_ID = "deepseek-ai/DeepSeek-R1"  # R1 model
+load_dotenv()
+
+FRED_API_KEY = os.getenv("FRED_API_KEY")
+HUGGINGFACE_TOKEN = os.getenv("HUGGINGFACE_TOKEN")
+HF_MODEL_ID = "OpenAssistant/oasst-r-1-pythia-12b"
 HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}"
+
+# Validate token presence
+if not HUGGINGFACE_TOKEN:
+    st.error("Hugging Face token not found. Please set it in .env")
+if not FRED_API_KEY:
+    st.warning("FRED API key not found. Some data may fail to load.")
 
 # ---------------------
 # Session State
