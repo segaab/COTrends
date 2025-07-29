@@ -7,7 +7,7 @@ from yahooquery import Ticker
 # Configuration
 # ---------------------
 FRED_API_KEY = 'bb26c399cb6892eece681374de6d370e'
-HUGGINGFACE_TOKEN = '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'
+HUGGINGFACE_TOKEN = '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'
 HF_MODEL_ID = "deepseek-ai/DeepSeek-R1"  # R1 model
 HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_MODEL_ID}"
 
