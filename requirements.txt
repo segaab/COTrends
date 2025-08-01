@@ -16,4 +16,5 @@ yahooquery
 huggingface_hub
 requests 
 beautifulsoup4 
-lxml 
+lxml
+pdfkit
