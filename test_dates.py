@@ -1,116 +1,113 @@
-import streamlit as st
-import requests
-import datetime
-import pandas as pd
-import pdfkit
 import os
+import json
+import requests
 from bs4 import BeautifulSoup
+from fpdf import FPDF
+import html
+import re
 
-# -------------------------------
-# CONFIGURATION
-# -------------------------------
 HEADERS = {
-    "User-Agent": "Tsegaab G segaab120@gmail.com"
-}
-PDF_OPTIONS = {
-    'quiet': '',
-    'enable-local-file-access': None,
-    'page-size': 'Letter',
-    'encoding': 'UTF-8',
+    "User-Agent": "Mozilla/5.0",
+    "Accept-Encoding": "gzip, deflate",
+    "Host": "data.sec.gov",
+    "From": "segaab120@gmail.com",  # Required by SEC API rules
 }
 
-BANKS = {
-    "JPMorgan Chase": "0000019617",
-    "Bank of America": "0000070858",
-    "U.S. Bank": "0000036104",
-    "Citigroup": "0000831001",
-    "PNC Financial": "0000713676",
-    "Wells Fargo": "0000072971"
-}
-
-# -------------------------------
-# HELPER FUNCTIONS
-# -------------------------------
-
-def get_filings(cik: str, form_type="10-Q"):
+def fetch_xbrl_xml(cik: str) -> str:
     url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
+    response = requests.get(url, headers=HEADERS)
+    response.raise_for_status()
+    data = response.json()
+    for filing in data.get("filings", {}).get("recent", {}).get("accessionNumber", []):
+        if "10-Q" in filing or "10-K" in filing:
+            acc_number = filing.replace("-", "")
+            base_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_number}"
+            return base_url
+    return None
+
+def clean_xbrl_value(value: str) -> str:
+    """
+    Remove XML/HTML tags and entities from XBRL content.
+    """
+    if not value:
+        return ""
+    value = html.unescape(value)
+    value = re.sub(r"<[^>]+>", "", value)
+    return re.sub(r'\s+', ' ', value).strip()
+
+def extract_cleaned_data_from_xbrl(url: str) -> dict:
+    index_url = url + "/index.json"
+    index_res = requests.get(index_url, headers=HEADERS)
+    index_res.raise_for_status()
+    index_data = index_res.json()
+
+    # Find the XBRL document (.htm or .xml)
+    xbrl_file = next(
+        (f for f in index_data['directory']['item'] if "htm" in f['name'] or "xml" in f['name']), None
+    )
+    if not xbrl_file:
+        raise Exception("XBRL document not found")
+
+    file_url = f"{url}/{xbrl_file['name']}"
+    print(f"Downloading XBRL from: {file_url}")
+    xbrl_res = requests.get(file_url, headers=HEADERS)
+    xbrl_res.raise_for_status()
+
+    soup = BeautifulSoup(xbrl_res.content, "lxml-xml")
+    elements = soup.find_all(['ix:nonNumeric', 'ix:nonFraction'])
+
+    result = []
+    for el in elements:
+        name = el.get("name")
+        context = el.get("contextRef")
+        raw_value = el.text
+        cleaned_value = clean_xbrl_value(raw_value)
+        if name and cleaned_value:
+            result.append({
+                "field": name,
+                "value": cleaned_value,
+                "context": context
+            })
+
+    return {
+        "source_url": file_url,
+        "fields_extracted": result
+    }
+
+def write_to_json(data: dict, filename: str):
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+    print(f"[✓] JSON written to {filename}")
+
+def write_to_pdf(data: dict, filename: str):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.cell(200, 10, txt="SEC Filing Summary", ln=True, align="C")
+    pdf.ln(10)
+    pdf.multi_cell(0, 10, f"Source: {data['source_url']}\n\n")
+
+    for item in data["fields_extracted"]:
+        line = f"{item['field']}: {item['value']} (context: {item['context']})\n"
+        pdf.multi_cell(0, 10, line)
+
+    pdf.output(filename)
+    print(f"[✓] PDF written to {filename}")
+
+# -------------------- USAGE --------------------
+
+if __name__ == "__main__":
+    cik = "19617"  # JPMorgan Chase (CIK: 0000019617)
+
     try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
-        res.raise_for_status()
-        data = res.json()
-        filings = data.get("filings", {}).get("recent", {})
-        df = pd.DataFrame(filings)
-        if not df.empty:
-            df = df[df["form"] == form_type]
-            df["filingDate"] = pd.to_datetime(df["filingDate"])
-            df = df[["filingDate", "form", "accessionNumber", "primaryDocument"]]
-            df["fullURL"] = df.apply(
-                lambda row: f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{row['accessionNumber'].replace('-', '')}/{row['primaryDocument']}", axis=1
-            )
-            return df.sort_values("filingDate", ascending=False).head(5)
-        else:
-            return pd.DataFrame()
+        filing_url = fetch_xbrl_xml(cik)
+        if not filing_url:
+            print("No XBRL filing found.")
+            exit(1)
+
+        parsed_data = extract_cleaned_data_from_xbrl(filing_url)
+        write_to_json(parsed_data, "jpmorgan_filing.json")
+        write_to_pdf(parsed_data, "jpmorgan_filing.pdf")
+
     except Exception as e:
-        st.error(f"Failed to fetch filings for CIK {cik}: {e}")
-        return pd.DataFrame()
-
-def download_and_export(link: str, export_type: str, filename: str):
-    try:
-        response = requests.get(link, headers=HEADERS, timeout=15)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, "html.parser")
-        clean_html = soup.prettify()
-
-        if export_type == "PDF":
-            pdfkit.from_string(clean_html, f"{filename}.pdf", options=PDF_OPTIONS)
-            return f"{filename}.pdf"
-        elif export_type == "JSON":
-            with open(f"{filename}.json", "w", encoding="utf-8") as f:
-                f.write(response.text)
-            return f"{filename}.json"
-    except Exception as e:
-        st.error(f"Error downloading {link}: {e}")
-        return None
-
-# -------------------------------
-# STREAMLIT APP
-# -------------------------------
-
-st.set_page_config(page_title="EDGAR 10-Q Dashboard", layout="wide")
-st.title("📑 SEC EDGAR 10-Q Report Dashboard + Exporter")
-
-bank_selected = st.selectbox("Choose a bank", list(BANKS.keys()))
-cik = BANKS[bank_selected]
-
-st.info(f"Showing latest 10-Q filings for: **{bank_selected}**")
-
-df_filings = get_filings(cik)
-
-if not df_filings.empty:
-    df_display = df_filings[["filingDate", "form", "fullURL"]].rename(columns={
-        "filingDate": "Filing Date",
-        "form": "Form Type",
-        "fullURL": "Link to Report"
-    })
-    st.dataframe(df_display, use_container_width=True)
-
-    st.subheader("📤 Export Options")
-    export_type = st.radio("Choose export type:", ["PDF", "JSON"])
-    export_indices = st.multiselect("Select rows to export", df_display.index)
-
-    if st.button("Download Selected"):
-        for idx in export_indices:
-            row = df_filings.loc[idx]
-            date_str = row["filingDate"].strftime("%Y%m%d")
-            filename = f"{bank_selected.replace(' ', '_')}_{date_str}"
-            file_path = download_and_export(row["fullURL"], export_type, filename)
-            if file_path:
-                with open(file_path, "rb") as file:
-                    st.download_button(
-                        label=f"📎 Download {filename}.{export_type.lower()}",
-                        data=file,
-                        file_name=f"{filename}.{export_type.lower()}",
-                        mime="application/pdf" if export_type == "PDF" else "application/json"
-                    )
-else:
-    st.warning("No 10-Q filings found.")
+        print(f"[✗] Error: {e}")
