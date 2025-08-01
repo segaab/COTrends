@@ -1,53 +1,65 @@
-import streamlit as st
 import requests
+import re
 import pandas as pd
-from datetime import datetime
+import streamlit as st
 
-# Define headers for EDGAR API requests (per SEC guidelines)
-headers = {
-    "User-Agent": "Bank10QFetcher/1.0 (contact: segaab120@gmail.com; author: Tsegaab G)"
+# PDF.co API configuration
+PDFCO_API_KEY = "nToGFafi2kw9Nlx5JdgtvEoDjqw06HzKczviZvlZ4V7OXv7eN1ZS6eIUIVV2JOQi"
+PDFCO_HEADERS = {
+    "x-api-key": PDFCO_API_KEY,
+    "Content-Type": "application/json"
 }
 
-# List of banks and their corresponding 10-digit CIKs
-banks = {
-    "JPMorgan Chase": "0000019617",
-    "Bank of America": "0000070858",
-    "Citigroup": "0000831001",
-    "Goldman Sachs": "0000886982",
-    "Morgan Stanley": "0000895421"
-}
+# Fetch latest 10-Q PDF link
+with st.spinner("Fetching the latest 10-Q PDF from JPMorgan..."):
+    try:
+        res = requests.get("https://jpmorganchaseco.gcs-web.com/ir/sec-other-filings/overview", headers={"User-Agent": "Mozilla/5.0"})
+        pdf_links = re.findall(r'https://[^\"]+\.pdf', res.text)
+        if not pdf_links:
+            st.error("❌ No PDF links found.")
+            st.stop()
+        latest_pdf_url = pdf_links[0]
+        st.success(f"✅ PDF Found: [View PDF]({latest_pdf_url})")
+    except Exception as e:
+        st.error(f"Error fetching PDF links: {e}")
+        st.stop()
 
-# Streamlit UI
-st.set_page_config(page_title="EDGAR 10-Q Dashboard", layout="wide")
-st.title("📄 EDGAR 10-Q Filings Fetcher")
+# Parse PDF via PDF.co API
+with st.spinner("Parsing PDF via PDF.co API..."):
+    try:
+        parse_url = "https://api.pdf.co/v1/pdf/convert/to/text"
+        payload = {"url": latest_pdf_url, "inline": True, "pages": ""}
+        parse_res = requests.post(parse_url, json=payload, headers=PDFCO_HEADERS)
+        parse_res.raise_for_status()
+        parsed_text = parse_res.json().get("body", "")
+        st.text_area("Parsed PDF Text", parsed_text, height=300)  # Debug: View extracted text
+    except Exception as e:
+        st.error(f"Error parsing PDF via API: {e}")
+        st.stop()
 
-bank_choice = st.selectbox("Select a bank:", list(banks.keys()))
+# Extract sector loan data from parsed text
+with st.spinner("Extracting sector loan data..."):
+    patterns = {
+        "Real Estate": r"real estate[^\\n$]*?\\$?([\\d.,]+)",
+        "Commercial": r"commercial[^\\n$]*?\\$?([\\d.,]+)",
+        "Consumer": r"consumer[^\\n$]*?\\$?([\\d.,]+)",
+        "Agriculture": r"agriculture[^\\n$]*?\\$?([\\d.,]+)"
+    }
+    data = {}
+    for sector, pattern in patterns.items():
+        match = re.search(pattern, parsed_text, re.IGNORECASE)
+        if match:
+            try:
+                value = float(match.group(1).replace(",", ""))
+                data[sector] = value
+            except ValueError:
+                pass
 
-# Fetch EDGAR submissions for selected bank
-cik = banks[bank_choice]
-submissions_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
-
-try:
-    response = requests.get(submissions_url, headers=headers, timeout=10)
-    response.raise_for_status()
-    data = response.json()
-
-    # Filter for 10-Q filings only
-    filings = data.get("filings", {}).get("recent", {})
-    if not filings:
-        st.warning("No filings found in EDGAR data.")
-    else:
-        df = pd.DataFrame(filings)
-        df = df[df["form"] == "10-Q"]
-
-        # Prepare and display the latest 5 10-Q filings
-        df_result = pd.DataFrame({
-            "Accession Number": df["accessionNumber"].head(5),
-            "Filing Date": df["filingDate"].head(5),
-            "Report URL": [f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc.replace('-', '')}/{acc}-index.htm" for acc in df["accessionNumber"].head(5)]
-        })
-
-        st.subheader(f"Latest 10-Q Filings for {bank_choice}")
-        st.dataframe(df_result, use_container_width=True)
-except requests.exceptions.RequestException as e:
-    st.error(f"Error fetching data: {e}")
+# Display extracted data
+if data:
+    st.subheader("📊 Sector Loan Exposure Breakdown")
+    df = pd.DataFrame.from_dict(data, orient="index", columns=["Loan Exposure (USD)"])
+    st.bar_chart(df)
+    st.dataframe(df)
+else:
+    st.warning("No sector data extracted from the PDF.")
