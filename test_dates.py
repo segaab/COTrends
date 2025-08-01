@@ -18,29 +18,33 @@ BANK_SOURCES = {
 
 def fetch_10q_links(url, max_pages=5):
     links = []
-    try:
-        for i in range(max_pages):
-            page = requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
-            soup = BeautifulSoup(page.content, "html.parser")
+    current_url = url
+    for page_num in range(max_pages):
+        try:
+            res = requests.get(current_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+            soup = BeautifulSoup(res.content, "html.parser")
             a_tags = soup.find_all("a", href=True)
+            found_new = False
             for tag in a_tags:
                 href = tag["href"]
                 text = tag.get_text(strip=True).lower()
                 if "10-q" in href.lower() or "10-q" in text:
-                    full_url = href if href.startswith("http") else requests.compat.urljoin(url, href)
+                    full_url = href if href.startswith("http") else requests.compat.urljoin(current_url, href)
                     if full_url not in links:
                         links.append(full_url)
+                        found_new = True
 
-            # Try to find the "Next" link (depends on the bank's pagination)
-            next_page = soup.find("a", string=re.compile("Next", re.IGNORECASE))
-            if next_page and "href" in next_page.attrs:
-                url = requests.compat.urljoin(url, next_page["href"])
+            # Try to find a next page link — limit by max_pages
+            next_link = soup.find("a", string=re.compile("next", re.IGNORECASE))
+            if next_link and "href" in next_link.attrs:
+                next_href = next_link["href"]
+                current_url = requests.compat.urljoin(current_url, next_href)
             else:
-                break
-    except Exception as e:
-        st.error(f"Failed to fetch from {url} - {str(e)}")
+                break  # No next page found
+        except Exception as e:
+            st.error(f"[Error on page {page_num+1}] {e}")
+            break
     return links
-
 
 for bank, url in BANK_SOURCES.items():
     st.subheader(bank)
