@@ -1,82 +1,100 @@
-import streamlit as st
+import os
+import json
 import requests
-import re
-import pandas as pd
+from bs4 import BeautifulSoup
+from fpdf import FPDF
 
-# 🔐 Replace this with your actual PDF.co API Key
-PDFCO_API_KEY = "segaab120@gmail.com_nToGFafi2kw9Nlx5JdgtvEoDjqw06HzKczviZvlZ4V7OXv7eN1ZS6eIUIVV2JOQi"
 
-PDFCO_HEADERS = {
-    "x-api-key": PDFCO_API_KEY,
-    "Content-Type": "application/json"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept-Encoding": "gzip, deflate",
+    "Host": "data.sec.gov",
+    "From": "segaab120@gmail.com",  # Contact info per SEC API rules
 }
 
-# Set up the Streamlit app
-st.set_page_config(page_title="Sector Loan Exposure Dashboard", layout="wide")
-st.title("📊 10-Q Sector Loan Exposure Dashboard (via PDF.co)")
+def fetch_xbrl_xml(cik: str) -> str:
+    url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
+    response = requests.get(url, headers=HEADERS)
+    response.raise_for_status()
+    data = response.json()
+    for filing in data.get("filings", {}).get("recent", {}).get("accessionNumber", []):
+        if "10-Q" in filing or "10-K" in filing:
+            acc_number = filing.replace("-", "")
+            base_url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_number}"
+            return base_url
+    return None
 
-# Input: PDF URL
-pdf_url = st.text_input(
-    label="Enter direct 10-Q PDF URL (from SEC or other public source):",
-    value="https://www.sec.gov/Archives/edgar/data/19617/000001961724000117/jpm-20240630.pdf"
-)
 
-# Trigger PDF parsing
-if st.button("Parse PDF and Show Dashboard"):
-    with st.spinner("🔄 Parsing PDF via PDF.co..."):
-        try:
-            # Send request to PDF.co
-            payload = {
-                "url": pdf_url,
-                "inline": True,
-                "pages": ""
-            }
+def extract_cleaned_data_from_xbrl(url: str) -> dict:
+    # Download the main inline XBRL document (usually ends in .htm or _htm.xml)
+    index_url = url + "/index.json"
+    index_res = requests.get(index_url, headers=HEADERS)
+    index_res.raise_for_status()
+    index_data = index_res.json()
 
-            response = requests.post(
-                "https://api.pdf.co/v1/pdf/convert/to/text",
-                headers=PDFCO_HEADERS,
-                json=payload,
-                timeout=30
-            )
-            response.raise_for_status()
+    # Find the XBRL document
+    xbrl_file = next((f for f in index_data['directory']['item'] if "htm" in f['name'] or "xml" in f['name']), None)
+    if not xbrl_file:
+        raise Exception("XBRL document not found")
 
-            result = response.json()
-            parsed_text = result.get("body", "")
+    file_url = url + "/" + xbrl_file['name']
+    print(f"Downloading XBRL from: {file_url}")
+    xbrl_res = requests.get(file_url, headers=HEADERS)
+    xbrl_res.raise_for_status()
 
-            if not parsed_text:
-                st.warning("⚠️ No content was extracted from the PDF.")
-                st.stop()
+    soup = BeautifulSoup(xbrl_res.content, "lxml-xml")
+    elements = soup.find_all(['ix:nonNumeric', 'ix:nonFraction'])
 
-            st.text_area("📄 Parsed Text Preview", parsed_text[:3000], height=300)
+    result = []
+    for el in elements:
+        name = el.get("name")
+        context = el.get("contextRef")
+        value = el.text.strip()
+        if name and value:
+            result.append({"field": name, "value": value, "context": context})
 
-            # Extract sector-specific loan figures using regex
-            patterns = {
-                "Real Estate": r"real estate[^\\n$]*?\\$?([\d.,]+)",
-                "Commercial": r"commercial[^\\n$]*?\\$?([\d.,]+)",
-                "Consumer": r"consumer[^\\n$]*?\\$?([\d.,]+)",
-                "Agriculture": r"agriculture[^\\n$]*?\\$?([\d.,]+)"
-            }
+    return {
+        "source_url": file_url,
+        "fields_extracted": result
+    }
 
-            sector_data = {}
-            for sector, pattern in patterns.items():
-                match = re.search(pattern, parsed_text, re.IGNORECASE)
-                if match:
-                    try:
-                        value = float(match.group(1).replace(",", ""))
-                        sector_data[sector] = value
-                    except ValueError:
-                        continue
 
-            if sector_data:
-                # Display dashboard
-                st.subheader("📈 Loan Exposure by Sector")
-                df = pd.DataFrame.from_dict(sector_data, orient="index", columns=["Loan Exposure (USD)"])
-                st.bar_chart(df)
-                st.dataframe(df)
-            else:
-                st.warning("⚠️ No sector loan data was extracted from the text.")
+def write_to_json(data: dict, filename: str):
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+    print(f"[✓] JSON written to {filename}")
 
-        except requests.exceptions.RequestException as req_err:
-            st.error(f"❌ Request to PDF.co API failed: {req_err}")
-        except Exception as e:
-            st.error(f"❌ Unexpected error occurred: {e}")
+
+def write_to_pdf(data: dict, filename: str):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+
+    pdf.cell(200, 10, txt="SEC Filing Summary", ln=True, align="C")
+    pdf.ln(10)
+    pdf.multi_cell(0, 10, f"Source: {data['source_url']}\n\n")
+
+    for item in data["fields_extracted"]:
+        pdf.multi_cell(0, 10, f"{item['field']}: {item['value']} (context: {item['context']})\n")
+
+    pdf.output(filename)
+    print(f"[✓] PDF written to {filename}")
+
+
+# -------------------- USAGE --------------------
+
+if __name__ == "__main__":
+    cik = "19617"  # JPMorgan Chase (0000019617)
+
+    try:
+        filing_url = fetch_xbrl_xml(cik)
+        if not filing_url:
+            print("No XBRL filing found.")
+            exit(1)
+
+        parsed_data = extract_cleaned_data_from_xbrl(filing_url)
+        write_to_json(parsed_data, "jpmorgan_filing.json")
+        write_to_pdf(parsed_data, "jpmorgan_filing.pdf")
+
+    except Exception as e:
+        print(f"[✗] Error: {e}")
