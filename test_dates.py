@@ -1,56 +1,71 @@
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
-import time
+import datetime
+import pandas as pd
 
-st.set_page_config(page_title="EDGAR 10-Q Scraper", layout="wide")
-st.title("📄 EDGAR Bank 10-Q Scraper")
-
-BANK_CIKS = {
-    "JPMorgan Chase": "19617",
-    "Bank of America": "70858",
-    "U.S. Bancorp": "36104",
-    "Citigroup": "831001",
-    "PNC Financial": "713676",
-    "Wells Fargo": "72971",
-}
-
+# -------------------------------
+# CONFIGURATION
+# -------------------------------
 HEADERS = {
-    "User-Agent": "Mozilla/5.0"
+    "User-Agent": "Tsegaab G segaab120@gmail.com"
 }
 
-BASE_EDGAR_URL = "https://data.sec.gov/submissions/CIK{}.json"
-FILINGS_URL = "https://www.sec.gov/Archives/{}"
+# Company CIKs — use 10-digit format with leading zeros
+BANKS = {
+    "JPMorgan Chase": "0000019617",
+    "Bank of America": "0000070858",
+    "U.S. Bank": "0000036104",
+    "Citigroup": "0000831001",
+    "PNC Financial": "0000713676",
+    "Wells Fargo": "0000072971"
+}
 
-def get_latest_10q_urls(cik, count=5):
-    time.sleep(0.5)  # polite delay
-    url = BASE_EDGAR_URL.format(cik.zfill(10))
+# -------------------------------
+# HELPER FUNCTIONS
+# -------------------------------
+
+def get_filings(cik: str, form_type="10-Q"):
+    url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
     try:
-        res = requests.get(url, headers=HEADERS)
-        if res.status_code != 200:
-            st.warning(f"Failed to retrieve CIK {cik} data.")
-            return []
+        res = requests.get(url, headers=HEADERS, timeout=10)
+        res.raise_for_status()
         data = res.json()
         filings = data.get("filings", {}).get("recent", {})
-        urls = []
-        for i, form in enumerate(filings.get("form", [])):
-            if form == "10-Q" and len(urls) < count:
-                acc_no = filings["accessionNumber"][i].replace("-", "")
-                filing_href = f"/Archives/edgar/data/{int(cik)}/{acc_no}/{filings['primaryDocument'][i]}"
-                full_url = FILINGS_URL.format(filing_href.lstrip("/"))
-                urls.append(full_url)
-        return urls
+        df = pd.DataFrame(filings)
+        if not df.empty:
+            df = df[df["form"] == form_type]
+            df["filingDate"] = pd.to_datetime(df["filingDate"])
+            df = df[["filingDate", "form", "accessionNumber", "primaryDocument"]]
+            df["fullURL"] = df["accessionNumber"].apply(
+                lambda acc: f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc.replace('-', '')}/{df.loc[df['accessionNumber'] == acc, 'primaryDocument'].values[0]}"
+            )
+            return df.sort_values("filingDate", ascending=False).head(5)
+        else:
+            return pd.DataFrame()
     except Exception as e:
-        st.error(f"Error: {e}")
-        return []
+        st.error(f"Failed to fetch filings for CIK {cik}: {e}")
+        return pd.DataFrame()
 
-st.subheader("Scrape 10-Q Filings via EDGAR")
-for bank, cik in BANK_CIKS.items():
-    st.markdown(f"### {bank}")
-    urls = get_latest_10q_urls(cik)
-    if urls:
-        for u in urls:
-            st.write(u)
-    else:
-        st.warning("No 10-Q filings found.")
-                
+# -------------------------------
+# STREAMLIT DASHBOARD
+# -------------------------------
+
+st.set_page_config(page_title="EDGAR 10-Q Dashboard", layout="wide")
+st.title("📑 SEC EDGAR 10-Q Report Dashboard")
+
+bank_selected = st.selectbox("Choose a bank", list(BANKS.keys()))
+cik = BANKS[bank_selected]
+
+st.info(f"Showing latest 10-Q filings for: **{bank_selected}**")
+
+df_filings = get_filings(cik)
+
+if not df_filings.empty:
+    df_display = df_filings[["filingDate", "form", "fullURL"]].rename(columns={
+        "filingDate": "Filing Date",
+        "form": "Form Type",
+        "fullURL": "Link to Report"
+    })
+    st.dataframe(df_display, use_container_width=True)
+else:
+    st.warning("No 10-Q filings found.")
