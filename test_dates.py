@@ -1,65 +1,24 @@
-# streamlit_app.py
+import streamlit as st import requests from bs4 import BeautifulSoup import re
 
-import streamlit as st
-import requests
-from bs4 import BeautifulSoup
-import re
+st.set_page_config(page_title="Bank 10-Q Dashboard", layout="wide") st.title("📄 Bank 10-Q Report Fetcher with Pagination")
 
-st.set_page_config(page_title="Sector Credit Exposure Dashboard", layout="wide")
-st.title("📊 Sector Credit Exposure from J.P. Morgan's Latest 10-K Filing")
+BANK_URLS = { "J.P. Morgan": "https://jpmorganchaseco.gcs-web.com/ir/sec-other-filings/overview", "Bank of America": "https://www.sec.gov/Archives/edgar/data/70858/000119312506105418/d10q.htm", "U.S. Bank": "https://ir.usbank.com/financials/sec-filings/default.aspx", "Citibank": "https://www.citigroup.com/global/investors/sec-filings", "PNC": "https://investor.pnc.com/sec-filings/all-sec-filings?form_type=10-Q&year=", "Wells Fargo": "https://www.wellsfargo.com/about/investor-relations/filings/" }
 
-# 1. Get the latest 10-K filing URL from EDGAR
-def get_latest_10k_url(cik="0000019617"):
-    url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
-    headers = {"User-Agent": "Mozilla/5.0"}
+def get_10q_links_jpm(): # Static fallback, JPM requires JS rendering return ["https://www.sec.gov/ix?doc=/Archives/edgar/data/19617/000001961724000032/jpm-20240630.htm"]
 
-    r = requests.get(url, headers=headers)
-    filings = r.json()["filings"]["recent"]
-    
-    for idx, form in enumerate(filings["form"]):
-        if form == "10-K":
-            accession = filings["accessionNumber"][idx].replace("-", "")
-            filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/index.json"
-            return filing_url
-    return None
+def get_10q_links_boa(): return ["https://www.sec.gov/Archives/edgar/data/70858/000119312506105418/d10q.htm"]
 
-# 2. Parse the index and get the actual 10-K filing URL
-def extract_10k_html_url(index_url):
-    r = requests.get(index_url, headers={"User-Agent": "Mozilla/5.0"})
-    filing_json = r.json()
-    for file in filing_json["directory"]["item"]:
-        if file["name"].endswith(".htm") and "10-k" in file["name"].lower():
-            base = index_url.rsplit("/", 1)[0]
-            return f"{base}/{file['name']}"
-    return None
+def get_10q_links_usbank(): base_url = "https://ir.usbank.com/financials/sec-filings/default.aspx" response = requests.get(base_url, headers={"User-Agent": "Mozilla/5.0"}) soup = BeautifulSoup(response.text, "html.parser") links = [] for a in soup.find_all("a", href=True): if "10-q" in a.text.lower(): link = a["href"] if not link.startswith("http"): link = "https://ir.usbank.com" + link links.append(link) if len(links) >= 5: break return links
 
-# 3. Scrape the HTML and find the Sector Exposure Table/Text
-def get_sector_credit_section(html_url):
-    r = requests.get(html_url, headers={"User-Agent": "Mozilla/5.0"})
-    soup = BeautifulSoup(r.content, "html.parser")
+def get_10q_links_citi(): base_url = "https://www.citigroup.com/global/investors/sec-filings" links = [] page = 1 while len(links) < 5: resp = requests.get(f"{base_url}?page={page}", headers={"User-Agent": "Mozilla/5.0"}) soup = BeautifulSoup(resp.text, "html.parser") for a in soup.find_all("a", href=True): if "10-q" in a.text.lower(): link = a["href"] if not link.startswith("http"): link = "https://www.citigroup.com" + link links.append(link) if len(links) >= 5: break page += 1 if page > 10: break return links
 
-    text_blocks = soup.get_text().split("\n")
-    matched_lines = []
+def get_10q_links_pnc(): base_url = "https://investor.pnc.com/sec-filings/all-sec-filings?form_type=10-Q&year=2024" response = requests.get(base_url, headers={"User-Agent": "Mozilla/5.0"}) soup = BeautifulSoup(response.text, "html.parser") links = [] for a in soup.find_all("a", href=True): if "10-q" in a.text.lower(): link = a["href"] if not link.startswith("http"): link = "https://investor.pnc.com" + link links.append(link) if len(links) >= 5: break return links
 
-    for i, line in enumerate(text_blocks):
-        if "Wholesale Credit Exposure" in line or "industry exposure" in line:
-            matched_lines.extend(text_blocks[i:i+30])  # grab 30 lines below
-            break
+def get_10q_links_wells(): base_url = "https://www.wellsfargo.com/about/investor-relations/filings/" resp = requests.get(base_url, headers={"User-Agent": "Mozilla/5.0"}) soup = BeautifulSoup(resp.text, "html.parser") links = [] for a in soup.find_all("a", href=True): if "10-q" in a.text.lower(): link = a["href"] if not link.startswith("http"): link = "https://www.wellsfargo.com" + link links.append(link) if len(links) >= 5: break return links
 
-    return "\n".join(matched_lines) if matched_lines else "Sector credit exposure not found."
+LINK_FUNCTIONS = { "J.P. Morgan": get_10q_links_jpm, "Bank of America": get_10q_links_boa, "U.S. Bank": get_10q_links_usbank, "Citibank": get_10q_links_citi, "PNC": get_10q_links_pnc, "Wells Fargo": get_10q_links_wells }
 
-# Run all
-st.subheader("Fetching from SEC EDGAR...")
-index_url = get_latest_10k_url()
-if index_url:
-    html_url = extract_10k_html_url(index_url)
-    if html_url:
-        sector_data = get_sector_credit_section(html_url)
-        st.code(sector_data, language="text")
-    else:
-        st.warning("Failed to find 10-K HTML filing.")
-else:
-    st.warning("Could not locate a recent 10-K filing.")
+selected_bank = st.selectbox("Select a Bank", list(BANK_URLS.keys()))
 
-st.markdown("---")
-st.caption("Data fetched live from [SEC.gov](https://www.sec.gov/). Scraper runs browserlessly using `requests`.")
+if st.button("Fetch 10-Q Reports"): st.info(f"Fetching 10-Q reports for {selected_bank}...") try: links = LINK_FUNCTIONSselected_bank if links: for i, link in enumerate(links, 1): st.markdown(f"{i}. View 10-Q Report") else: st.warning("No 10-Q reports found.") except Exception as e: st.error(f"Error fetching reports: {e}")
+
