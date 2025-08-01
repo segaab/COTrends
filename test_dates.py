@@ -1,4 +1,7 @@
-import streamlit as st import requests from bs4 import BeautifulSoup import re
+import streamlit as st
+import requests
+from bs4 import BeautifulSoup
+import re
 
 st.set_page_config(page_title="Bank 10-Q Dashboard", layout="wide") st.title("📄 Bank 10-Q Report Fetcher with Pagination")
 
