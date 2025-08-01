@@ -6,51 +6,107 @@ import re
 st.set_page_config(page_title="Bank 10-Q Dashboard", layout="wide")
 st.title("📄 Bank 10-Q Report Fetcher with Pagination")
 
-BANK_SOURCES = {
+BANK_URLS = {
     "J.P. Morgan": "https://jpmorganchaseco.gcs-web.com/ir/sec-other-filings/overview",
-    "BoA": "https://www.sec.gov/Archives/edgar/data/70858/000119312506105418/d10q.htm",
+    "Bank of America": "https://www.sec.gov/Archives/edgar/data/70858/000119312506105418/d10q.htm",
     "U.S. Bank": "https://ir.usbank.com/financials/sec-filings/default.aspx",
     "Citibank": "https://www.citigroup.com/global/investors/sec-filings",
     "PNC": "https://investor.pnc.com/sec-filings/all-sec-filings?form_type=10-Q&year=",
     "Wells Fargo": "https://www.wellsfargo.com/about/investor-relations/filings/"
 }
 
+def get_10q_links_jpm():
+    # Static fallback, JPM requires JS rendering
+    return ["https://www.sec.gov/ix?doc=/Archives/edgar/data/19617/000001961724000032/jpm-20240630.htm"]
 
-def fetch_10q_links(url, max_pages=5):
+def get_10q_links_boa():
+    return ["https://www.sec.gov/Archives/edgar/data/70858/000119312506105418/d10q.htm"]
+
+def get_10q_links_usbank():
+    base_url = "https://ir.usbank.com/financials/sec-filings/default.aspx"
+    response = requests.get(base_url, headers={"User-Agent": "Mozilla/5.0"})
+    soup = BeautifulSoup(response.text, "html.parser")
     links = []
-    current_url = url
-    for page_num in range(max_pages):
-        try:
-            res = requests.get(current_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-            soup = BeautifulSoup(res.content, "html.parser")
-            a_tags = soup.find_all("a", href=True)
-            found_new = False
-            for tag in a_tags:
-                href = tag["href"]
-                text = tag.get_text(strip=True).lower()
-                if "10-q" in href.lower() or "10-q" in text:
-                    full_url = href if href.startswith("http") else requests.compat.urljoin(current_url, href)
-                    if full_url not in links:
-                        links.append(full_url)
-                        found_new = True
-
-            # Try to find a next page link — limit by max_pages
-            next_link = soup.find("a", string=re.compile("next", re.IGNORECASE))
-            if next_link and "href" in next_link.attrs:
-                next_href = next_link["href"]
-                current_url = requests.compat.urljoin(current_url, next_href)
-            else:
-                break  # No next page found
-        except Exception as e:
-            st.error(f"[Error on page {page_num+1}] {e}")
+    for a in soup.find_all("a", href=True):
+        if "10-q" in a.text.lower():
+            link = a["href"]
+            if not link.startswith("http"):
+                link = "https://ir.usbank.com" + link
+            links.append(link)
+        if len(links) >= 5:
             break
     return links
 
-for bank, url in BANK_SOURCES.items():
-    st.subheader(bank)
-    filings = fetch_10q_links(url, max_pages=5)
-    if filings:
-        for link in filings:
-            st.markdown(f"[📄 View 10-Q]({link})")
-    else:
-        st.warning("No 10-Q filings found or website structure unsupported.")
+def get_10q_links_citi():
+    base_url = "https://www.citigroup.com/global/investors/sec-filings"
+    links = []
+    page = 1
+    while len(links) < 5:
+        resp = requests.get(f"{base_url}?page={page}", headers={"User-Agent": "Mozilla/5.0"})
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            if "10-q" in a.text.lower():
+                link = a["href"]
+                if not link.startswith("http"):
+                    link = "https://www.citigroup.com" + link
+                links.append(link)
+            if len(links) >= 5:
+                break
+        page += 1
+        if page > 10:
+            break
+    return links
+
+def get_10q_links_pnc():
+    base_url = "https://investor.pnc.com/sec-filings/all-sec-filings?form_type=10-Q&year=2024"
+    response = requests.get(base_url, headers={"User-Agent": "Mozilla/5.0"})
+    soup = BeautifulSoup(response.text, "html.parser")
+    links = []
+    for a in soup.find_all("a", href=True):
+        if "10-q" in a.text.lower():
+            link = a["href"]
+            if not link.startswith("http"):
+                link = "https://investor.pnc.com" + link
+            links.append(link)
+        if len(links) >= 5:
+            break
+    return links
+
+def get_10q_links_wells():
+    base_url = "https://www.wellsfargo.com/about/investor-relations/filings/"
+    resp = requests.get(base_url, headers={"User-Agent": "Mozilla/5.0"})
+    soup = BeautifulSoup(resp.text, "html.parser")
+    links = []
+    for a in soup.find_all("a", href=True):
+        if "10-q" in a.text.lower():
+            link = a["href"]
+            if not link.startswith("http"):
+                link = "https://www.wellsfargo.com" + link
+            links.append(link)
+        if len(links) >= 5:
+            break
+    return links
+
+LINK_FUNCTIONS = {
+    "J.P. Morgan": get_10q_links_jpm,
+    "Bank of America": get_10q_links_boa,
+    "U.S. Bank": get_10q_links_usbank,
+    "Citibank": get_10q_links_citi,
+    "PNC": get_10q_links_pnc,
+    "Wells Fargo": get_10q_links_wells
+}
+
+selected_bank = st.selectbox("Select a Bank", list(BANK_URLS.keys()))
+
+if st.button("Fetch 10-Q Reports"):
+    st.info(f"Fetching 10-Q reports for {selected_bank}...")
+    try:
+        links = LINK_FUNCTIONS[selected_bank]()
+        if links:
+            for i, link in enumerate(links, 1):
+                st.markdown(f"{i}. [View 10-Q Report]({link})")
+        else:
+            st.warning("No 10-Q reports found.")
+    except Exception as e:
+        st.error(f"Error fetching reports: {e}")
+                           
