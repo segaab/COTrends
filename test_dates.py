@@ -2,6 +2,9 @@ import streamlit as st
 import requests
 import datetime
 import pandas as pd
+import pdfkit
+import os
+from bs4 import BeautifulSoup
 
 # -------------------------------
 # CONFIGURATION
@@ -9,8 +12,13 @@ import pandas as pd
 HEADERS = {
     "User-Agent": "Tsegaab G segaab120@gmail.com"
 }
+PDF_OPTIONS = {
+    'quiet': '',
+    'enable-local-file-access': None,
+    'page-size': 'Letter',
+    'encoding': 'UTF-8',
+}
 
-# Company CIKs — use 10-digit format with leading zeros
 BANKS = {
     "JPMorgan Chase": "0000019617",
     "Bank of America": "0000070858",
@@ -36,8 +44,8 @@ def get_filings(cik: str, form_type="10-Q"):
             df = df[df["form"] == form_type]
             df["filingDate"] = pd.to_datetime(df["filingDate"])
             df = df[["filingDate", "form", "accessionNumber", "primaryDocument"]]
-            df["fullURL"] = df["accessionNumber"].apply(
-                lambda acc: f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc.replace('-', '')}/{df.loc[df['accessionNumber'] == acc, 'primaryDocument'].values[0]}"
+            df["fullURL"] = df.apply(
+                lambda row: f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{row['accessionNumber'].replace('-', '')}/{row['primaryDocument']}", axis=1
             )
             return df.sort_values("filingDate", ascending=False).head(5)
         else:
@@ -46,12 +54,30 @@ def get_filings(cik: str, form_type="10-Q"):
         st.error(f"Failed to fetch filings for CIK {cik}: {e}")
         return pd.DataFrame()
 
+def download_and_export(link: str, export_type: str, filename: str):
+    try:
+        response = requests.get(link, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, "html.parser")
+        clean_html = soup.prettify()
+
+        if export_type == "PDF":
+            pdfkit.from_string(clean_html, f"{filename}.pdf", options=PDF_OPTIONS)
+            return f"{filename}.pdf"
+        elif export_type == "JSON":
+            with open(f"{filename}.json", "w", encoding="utf-8") as f:
+                f.write(response.text)
+            return f"{filename}.json"
+    except Exception as e:
+        st.error(f"Error downloading {link}: {e}")
+        return None
+
 # -------------------------------
-# STREAMLIT DASHBOARD
+# STREAMLIT APP
 # -------------------------------
 
 st.set_page_config(page_title="EDGAR 10-Q Dashboard", layout="wide")
-st.title("📑 SEC EDGAR 10-Q Report Dashboard")
+st.title("📑 SEC EDGAR 10-Q Report Dashboard + Exporter")
 
 bank_selected = st.selectbox("Choose a bank", list(BANKS.keys()))
 cik = BANKS[bank_selected]
@@ -67,5 +93,24 @@ if not df_filings.empty:
         "fullURL": "Link to Report"
     })
     st.dataframe(df_display, use_container_width=True)
+
+    st.subheader("📤 Export Options")
+    export_type = st.radio("Choose export type:", ["PDF", "JSON"])
+    export_indices = st.multiselect("Select rows to export", df_display.index)
+
+    if st.button("Download Selected"):
+        for idx in export_indices:
+            row = df_filings.loc[idx]
+            date_str = row["filingDate"].strftime("%Y%m%d")
+            filename = f"{bank_selected.replace(' ', '_')}_{date_str}"
+            file_path = download_and_export(row["fullURL"], export_type, filename)
+            if file_path:
+                with open(file_path, "rb") as file:
+                    st.download_button(
+                        label=f"📎 Download {filename}.{export_type.lower()}",
+                        data=file,
+                        file_name=f"{filename}.{export_type.lower()}",
+                        mime="application/pdf" if export_type == "PDF" else "application/json"
+                    )
 else:
     st.warning("No 10-Q filings found.")
