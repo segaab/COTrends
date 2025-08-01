@@ -3,46 +3,53 @@ import requests
 import re
 import pandas as pd
 
-# PDF.co API key (replace this!)
+# 🔐 Replace this with your actual PDF.co API Key
 PDFCO_API_KEY = "segaab120@gmail.com_nToGFafi2kw9Nlx5JdgtvEoDjqw06HzKczviZvlZ4V7OXv7eN1ZS6eIUIVV2JOQi"
+
 PDFCO_HEADERS = {
     "x-api-key": PDFCO_API_KEY,
     "Content-Type": "application/json"
 }
 
-# Streamlit app setup
-st.set_page_config(page_title="PDF Sector Exposure Dashboard", layout="wide")
-st.title("📊 Sector Loan Exposure from 10-Q PDF (via PDF.co)")
+# Set up the Streamlit app
+st.set_page_config(page_title="Sector Loan Exposure Dashboard", layout="wide")
+st.title("📊 10-Q Sector Loan Exposure Dashboard (via PDF.co)")
 
-# PDF URL input
+# Input: PDF URL
 pdf_url = st.text_input(
-    "Enter direct PDF URL:",
+    label="Enter direct 10-Q PDF URL (from SEC or other public source):",
     value="https://www.sec.gov/Archives/edgar/data/19617/000001961724000117/jpm-20240630.pdf"
 )
 
-# Button to trigger parsing and dashboard display
+# Trigger PDF parsing
 if st.button("Parse PDF and Show Dashboard"):
-    with st.spinner("Calling PDF.co API..."):
+    with st.spinner("🔄 Parsing PDF via PDF.co..."):
         try:
-            # Step 1: Send PDF to PDF.co
+            # Send request to PDF.co
             payload = {
                 "url": pdf_url,
                 "inline": True,
                 "pages": ""
             }
+
             response = requests.post(
                 "https://api.pdf.co/v1/pdf/convert/to/text",
-                json=payload,
                 headers=PDFCO_HEADERS,
+                json=payload,
                 timeout=30
             )
             response.raise_for_status()
-            parsed_text = response.json().get("body", "")
 
-            st.success("✅ PDF parsed successfully.")
-            st.text_area("📝 Parsed Text Preview", parsed_text[:3000], height=300)
+            result = response.json()
+            parsed_text = result.get("body", "")
 
-            # Step 2: Extract sector data via regex
+            if not parsed_text:
+                st.warning("⚠️ No content was extracted from the PDF.")
+                st.stop()
+
+            st.text_area("📄 Parsed Text Preview", parsed_text[:3000], height=300)
+
+            # Extract sector-specific loan figures using regex
             patterns = {
                 "Real Estate": r"real estate[^\\n$]*?\\$?([\d.,]+)",
                 "Commercial": r"commercial[^\\n$]*?\\$?([\d.,]+)",
@@ -60,16 +67,16 @@ if st.button("Parse PDF and Show Dashboard"):
                     except ValueError:
                         continue
 
-            # Step 3: Show results in dashboard
             if sector_data:
-                st.subheader("📈 Dashboard: Sector Loan Breakdown")
+                # Display dashboard
+                st.subheader("📈 Loan Exposure by Sector")
                 df = pd.DataFrame.from_dict(sector_data, orient="index", columns=["Loan Exposure (USD)"])
                 st.bar_chart(df)
                 st.dataframe(df)
             else:
-                st.warning("⚠️ No recognizable sector data found in the PDF.")
+                st.warning("⚠️ No sector loan data was extracted from the text.")
 
-        except requests.exceptions.RequestException as e:
-            st.error(f"❌ PDF.co API request failed: {e}")
+        except requests.exceptions.RequestException as req_err:
+            st.error(f"❌ Request to PDF.co API failed: {req_err}")
         except Exception as e:
-            st.error(f"❌ Unexpected error: {e}")
+            st.error(f"❌ Unexpected error occurred: {e}")
