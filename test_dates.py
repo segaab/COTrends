@@ -1,72 +1,61 @@
 import streamlit as st
 import requests
-import re
 import pandas as pd
-import xml.etree.ElementTree as ET
 
-# 🔐 Replace this with your actual PDF.co API Key
-PDFCO_API_KEY = "segaab120@gmail.com_nToGFafi2kw9Nlx5JdgtvEoDjqw06HzKczviZvlZ4V7OXv7eN1ZS6eIUIVV2JOQia"
-PDFCO_HEADERS = {
-    "x-api-key": PDFCO_API_KEY,
-    "Content-Type": "application/json"
+# SEC API CIK for JPMorgan Chase
+CIK = "0000019617"
+API_URL = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{CIK}.json"
+HEADERS = {
+    "User-Agent": "Tsegaab G (segaab120@gmail.com)"
 }
 
-# Streamlit UI
-st.set_page_config(page_title="PDF to Clean JSON", layout="wide")
-st.title("📄 Parse, Clean, and Convert PDF to JSON (via PDF.co)")
+# Set up Streamlit
+st.set_page_config(page_title="SEC 10-Q Test Dashboard", layout="wide")
+st.title("📊 SEC 10-Q Financials: JPMorgan Chase")
 
-# User inputs
-pdf_url = st.text_input(
-    "Enter direct PDF URL (e.g., 10-Q from SEC):",
-    value="https://www.sec.gov/Archives/edgar/data/19617/000001961724000117/jpm-20240630.pdf"
-)
-template_id = st.text_input(
-    "Enter your Document Parser Template ID:",
-    value="REPLACE_WITH_TEMPLATE_ID"
-)
+# Fetch JSON data from SEC
+with st.spinner("📡 Fetching financial facts from SEC API..."):
+    try:
+        response = requests.get(API_URL, headers=HEADERS, timeout=30)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        st.error(f"❌ Failed to fetch data: {e}")
+        st.stop()
 
-# Clean HTML/XML content
-def clean_xbrl_value(value: str) -> str:
-    """Remove XML/HTML tags and entities from parsed PDF text."""
-    if not value:
-        return ""
-    value = html.unescape(value)
-    value = re.sub(r"<[^>]+>", "", value)
-    return re.sub(r"\s+", " ", value).strip()
+# Define tags to extract
+metrics = {
+    "Revenue": "Revenues",
+    "Interest Expense": "InterestExpense",
+    "Net Income": "NetIncomeLoss",
+    "Total Loans": "LoansReceivableNet"
+}
 
-# Button logic
-if st.button("Parse PDF and Generate JSON"):
-    with st.spinner("🔄 Parsing PDF via PDF.co..."):
-        try:
-            # Call PDF.co Document Parser
-            endpoint = "https://api.pdf.co/v1/pdf/documentparser"
-            payload = {
-                "url": pdf_url,
-                "templateId": template_id,
-                "inline": True
-            }
+us_gaap = data.get("facts", {}).get("us-gaap", {})
 
-            response = requests.post(endpoint, headers=PDFCO_HEADERS, json=payload, timeout=30)
-            response.raise_for_status()
-            parsed = response.json()
+st.subheader("📂 Extracted Key Financial Metrics")
 
-            # Check and clean
-            if not parsed.get("body"):
-                st.warning("⚠️ No content extracted.")
-                st.stop()
+# Loop over each metric and extract data
+chart_data = {}
 
-            cleaned_text = clean_xbrl_value(parsed["body"])
-            st.text_area("📄 Cleaned PDF Text", cleaned_text[:3000], height=300)
+for label, tag in metrics.items():
+    tag_data = us_gaap.get(tag)
+    if tag_data and "USD" in tag_data.get("units", {}):
+        values = tag_data["units"]["USD"]
+        df = pd.DataFrame(values)
+        df = df[df["form"].isin(["10-Q", "10-K"])]
+        df["date"] = pd.to_datetime(df["end"], errors="coerce")
+        df = df.sort_values("date", ascending=True)
+        df = df[["date", "val"]].dropna()
 
-            # JSON output
-            output = {
-                "PDF Source URL": pdf_url,
-                "CleanedText": cleaned_text
-            }
-            json_str = json.dumps(output, indent=4)
-            st.download_button("📥 Download Cleaned JSON", json_str, file_name="cleaned_pdf_data.json")
+        if not df.empty:
+            df.set_index("date", inplace=True)
+            chart_data[label] = df["val"]
 
-        except requests.exceptions.RequestException as e:
-            st.error(f"❌ PDF.co API error: {e}")
-        except Exception as e:
-            st.error(f"❌ Unexpected error: {e}")
+# Combine all into one DataFrame
+if chart_data:
+    combined = pd.DataFrame(chart_data)
+    st.line_chart(combined)
+    st.dataframe(combined.tail(6))
+else:
+    st.warning("⚠️ No matching financial metrics found.")
