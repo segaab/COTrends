@@ -1,39 +1,65 @@
+# streamlit_app.py
+
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
+import re
 
-BASE_URL = "https://invest.bnpparibas"
-REPORT_PAGE = f"{BASE_URL}/en/document"
+st.set_page_config(page_title="Sector Credit Exposure Dashboard", layout="wide")
+st.title("📊 Sector Credit Exposure from J.P. Morgan's Latest 10-K Filing")
 
-def scrape_bnp_reports():
+# 1. Get the latest 10-K filing URL from EDGAR
+def get_latest_10k_url(cik="0000019617"):
+    url = f"https://data.sec.gov/submissions/CIK{cik.zfill(10)}.json"
     headers = {"User-Agent": "Mozilla/5.0"}
-    response = requests.get(REPORT_PAGE, headers=headers)
 
-    if response.status_code != 200:
-        return []
+    r = requests.get(url, headers=headers)
+    filings = r.json()["filings"]["recent"]
+    
+    for idx, form in enumerate(filings["form"]):
+        if form == "10-K":
+            accession = filings["accessionNumber"][idx].replace("-", "")
+            filing_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/index.json"
+            return filing_url
+    return None
 
-    soup = BeautifulSoup(response.text, "html.parser")
-    reports = []
+# 2. Parse the index and get the actual 10-K filing URL
+def extract_10k_html_url(index_url):
+    r = requests.get(index_url, headers={"User-Agent": "Mozilla/5.0"})
+    filing_json = r.json()
+    for file in filing_json["directory"]["item"]:
+        if file["name"].endswith(".htm") and "10-k" in file["name"].lower():
+            base = index_url.rsplit("/", 1)[0]
+            return f"{base}/{file['name']}"
+    return None
 
-    for link in soup.find_all("a", href=True):
-        text = link.get_text(strip=True)
-        href = link["href"]
+# 3. Scrape the HTML and find the Sector Exposure Table/Text
+def get_sector_credit_section(html_url):
+    r = requests.get(html_url, headers={"User-Agent": "Mozilla/5.0"})
+    soup = BeautifulSoup(r.content, "html.parser")
 
-        if "pillar" in text.lower() or "annual" in text.lower():
-            full_link = href if href.startswith("http") else BASE_URL + href
-            reports.append((text, full_link))
+    text_blocks = soup.get_text().split("\n")
+    matched_lines = []
 
-    return reports
+    for i, line in enumerate(text_blocks):
+        if "Wholesale Credit Exposure" in line or "industry exposure" in line:
+            matched_lines.extend(text_blocks[i:i+30])  # grab 30 lines below
+            break
 
-# Streamlit App
-st.title("📄 BNP Paribas Report Scraper")
-st.write("Fetching the latest sector-related credit reports from BNP Paribas.")
+    return "\n".join(matched_lines) if matched_lines else "Sector credit exposure not found."
 
-with st.spinner("Scraping..."):
-    report_links = scrape_bnp_reports()
-
-if report_links:
-    for title, url in report_links:
-        st.markdown(f"- [{title}]({url})")
+# Run all
+st.subheader("Fetching from SEC EDGAR...")
+index_url = get_latest_10k_url()
+if index_url:
+    html_url = extract_10k_html_url(index_url)
+    if html_url:
+        sector_data = get_sector_credit_section(html_url)
+        st.code(sector_data, language="text")
+    else:
+        st.warning("Failed to find 10-K HTML filing.")
 else:
-    st.warning("No relevant reports found.")
+    st.warning("Could not locate a recent 10-K filing.")
+
+st.markdown("---")
+st.caption("Data fetched live from [SEC.gov](https://www.sec.gov/). Scraper runs browserlessly using `requests`.")
