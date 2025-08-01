@@ -15,4 +15,5 @@ streamlit-card>=1.0.2
 yahooquery
 huggingface_hub
 requests 
-beautifulsoup4
+beautifulsoup4 
+lxml 
