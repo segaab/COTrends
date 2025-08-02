@@ -2,19 +2,19 @@ import streamlit as st
 import requests
 import pandas as pd
 
-# SEC API CIK for JPMorgan Chase
-CIK = "0000019617"
+# Configuration
+CIK = "0000019617"  # JPMorgan Chase
 API_URL = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{CIK}.json"
 HEADERS = {
-    "User-Agent": "Tsegaab G (segaab120@gmail.com)"
+    "User-Agent": "Tsegaab G (segaab120@gmail.com)"  # Replace with your email
 }
 
-# Set up Streamlit
-st.set_page_config(page_title="SEC 10-Q Test Dashboard", layout="wide")
+# Initialize Streamlit App
+st.set_page_config(page_title="SEC 10-Q Dashboard", layout="wide")
 st.title("📊 SEC 10-Q Financials: JPMorgan Chase")
 
-# Fetch JSON data from SEC
-with st.spinner("📡 Fetching financial facts from SEC API..."):
+# Fetch SEC data
+with st.spinner("📡 Fetching data from SEC..."):
     try:
         response = requests.get(API_URL, headers=HEADERS, timeout=30)
         response.raise_for_status()
@@ -23,7 +23,7 @@ with st.spinner("📡 Fetching financial facts from SEC API..."):
         st.error(f"❌ Failed to fetch data: {e}")
         st.stop()
 
-# Define tags to extract
+# Select key metrics
 metrics = {
     "Revenue": "Revenues",
     "Interest Expense": "InterestExpense",
@@ -33,9 +33,9 @@ metrics = {
 
 us_gaap = data.get("facts", {}).get("us-gaap", {})
 
-st.subheader("📂 Extracted Key Financial Metrics")
+st.subheader("📂 Extracted Financial Metrics")
 
-# Loop over each metric and extract data
+# Build time series
 chart_data = {}
 
 for label, tag in metrics.items():
@@ -45,17 +45,20 @@ for label, tag in metrics.items():
         df = pd.DataFrame(values)
         df = df[df["form"].isin(["10-Q", "10-K"])]
         df["date"] = pd.to_datetime(df["end"], errors="coerce")
-        df = df.sort_values("date", ascending=True)
         df = df[["date", "val"]].dropna()
+        df = df.drop_duplicates(subset="date")
+        df.set_index("date", inplace=True)
 
         if not df.empty:
-            df.set_index("date", inplace=True)
             chart_data[label] = df["val"]
 
-# Combine all into one DataFrame
+# Merge and display
 if chart_data:
-    combined = pd.DataFrame(chart_data)
+    combined = pd.concat(chart_data.values(), axis=1)
+    combined.columns = list(chart_data.keys())
+    combined = combined.sort_index()
+
     st.line_chart(combined)
     st.dataframe(combined.tail(6))
 else:
-    st.warning("⚠️ No matching financial metrics found.")
+    st.warning("⚠️ No matching metrics found for this company.")
