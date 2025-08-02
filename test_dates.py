@@ -1,70 +1,82 @@
 import streamlit as st
 import requests
 from bs4 import BeautifulSoup
-import json
 
-# 🔐 PDF.co API key
-PDFCO_API_KEY = "segaab120@gmail.com_nToGFafi2kw9Nlx5JdgtvEoDjqw06HzKczviZvlZ4V7OXv7eN1ZS6eIUIVV2JOQi"
-PDFCO_HEADERS = {
-    "x-api-key": PDFCO_API_KEY,
-    "Content-Type": "application/json"
+# === Configuration ===
+st.set_page_config(page_title="SEC 10‑Q Parser", layout="wide")
+st.title("📄 SEC EDGAR 10‑Q HTML Parser - Wholesale Credit Exposure")
+
+CIK = "0000019617"  # JPMorgan Chase
+HEADERS = {
+    "User-Agent": "segaab120@gmail.com"
 }
 
-# Wells Fargo 10-Q Reports page
-REPORTS_PAGE_URL = "https://www.wellsfargo.com/about/investor-relations/filings/"
-
-# Streamlit page setup
-st.set_page_config(page_title="Wells Fargo 10-Q Parser", layout="wide")
-st.title("📄 Wells Fargo 10-Q Report Parser")
-
-# ⛏️ Scrape 10-Q report links
+# === Step 1: Fetch latest 10-Q index JSON URL from EDGAR ===
 @st.cache_data(show_spinner=False)
-def fetch_10q_links():
-    res = requests.get(REPORTS_PAGE_URL, headers={"User-Agent": "segaab120@gmail.com"})
-    soup = BeautifulSoup(res.text, "html.parser")
-    links = soup.find_all("a", href=True)
+def fetch_latest_10q_html():
+    index_url = f"https://data.sec.gov/submissions/CIK{CIK}.json"
+    res = requests.get(index_url, headers=HEADERS)
+    res.raise_for_status()
+    data = res.json()
 
-    ten_q_links = []
-    for link in links:
-        href = link['href']
-        if "10-q" in href.lower() or "10q" in link.text.lower():
-            full_url = href if href.startswith("http") else "https://www.wellsfargo.com" + href
-            ten_q_links.append({"text": link.text.strip(), "url": full_url})
+    filings = data.get("filings", {}).get("recent", {})
+    for i, form in enumerate(filings.get("form", [])):
+        if form == "10-Q":
+            accession = filings["accessionNumber"][i].replace("-", "")
+            cik_int = int(CIK)
+            return f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession}/index.json"
+    return None
 
-    return ten_q_links
+# === Step 2: Get .htm or .xml report from index ===
+def fetch_html_url_from_index(index_json_url):
+    res = requests.get(index_json_url, headers=HEADERS)
+    res.raise_for_status()
+    index = res.json()
+    for item in index["directory"]["item"]:
+        name = item["name"].lower()
+        if name.endswith(".htm") or name.endswith(".xml"):
+            return index_json_url.rsplit("/", 1)[0] + "/" + item["name"]
+    return None
 
-# Display links and UI
-ten_q_reports = fetch_10q_links()
-st.subheader("📁 Available 10-Q Reports")
+# === Step 3: Parse the <WholesaleCreditPortfolio> section ===
+def extract_wholesale_credit_section(url):
+    res = requests.get(url, headers=HEADERS)
+    soup = BeautifulSoup(res.content, "lxml-xml")
+    section = soup.find("WholesaleCreditPortfolio")
 
-if ten_q_reports:
-    report_titles = [f"{r['text']}" for r in ten_q_reports]
-    selected = st.selectbox("Select a report to send to PDF.co API:", options=report_titles)
-    selected_url = next((r['url'] for r in ten_q_reports if r['text'] == selected), None)
+    if not section:
+        return None
 
-    st.markdown(f"🔗 [View Selected Report]({selected_url})")
+    entries = []
+    for el in section.find_all():
+        tag = el.name
+        value = el.get_text(strip=True)
+        if tag and value:
+            entries.append((tag, value))
+    return entries
 
-    if st.button("📤 Send to PDF.co API"):
-        with st.spinner("Sending to PDF.co Document Parser..."):
-            payload = {
-                "url": selected_url,
-                "inline": True
-            }
-            try:
-                response = requests.post(
-                    "https://api.pdf.co/v1/pdf/convert/to/text",
-                    headers=PDFCO_HEADERS,
-                    json=payload,
-                    timeout=30
-                )
-                response.raise_for_status()
-                parsed = response.json()
-                if parsed.get("body"):
-                    st.subheader("📄 Parsed Text Preview")
-                    st.text_area("Extracted Content:", parsed["body"][:3000], height=300)
-                else:
-                    st.warning("⚠️ No content returned by PDF.co.")
-            except Exception as e:
-                st.error(f"❌ Error: {e}")
-else:
-    st.warning("⚠️ No 10-Q links found on the Wells Fargo filings page.")
+# === Streamlit UI ===
+st.subheader("🔍 Step 1: Fetch Latest 10‑Q Filing from SEC")
+if st.button("Fetch Latest 10‑Q HTML Link"):
+    index_url = fetch_latest_10q_html()
+    if index_url:
+        html_url = fetch_html_url_from_index(index_url)
+        if html_url:
+            st.success(f"✅ Found report URL: [Open Filing]({html_url})")
+            st.session_state["html_url"] = html_url
+        else:
+            st.warning("⚠️ No HTML/XML report found in this filing.")
+    else:
+        st.warning("⚠️ No recent 10‑Q filing found for JPMorgan.")
+
+# === Extract <WholesaleCreditPortfolio> from selected filing ===
+if "html_url" in st.session_state:
+    st.subheader("📤 Step 2: Extract <WholesaleCreditPortfolio> Section")
+    if st.button("Parse and Display"):
+        data = extract_wholesale_credit_section(st.session_state["html_url"])
+        if data:
+            st.subheader("📊 Extracted Wholesale Credit Exposure")
+            for tag, val in data:
+                st.markdown(f"**{tag}**: {val}")
+        else:
+            st.warning("❗ <WholesaleCreditPortfolio> section not found in the report.")
