@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 
 # === Configuration ===
 st.set_page_config(page_title="SEC 10‑Q Parser", layout="wide")
-st.title("📄 SEC EDGAR 10‑Q HTML Parser - Wholesale Credit Exposure")
+st.title("📄 SEC EDGAR 10‑Q HTML Parser - Tag List Only")
 
 CIK = "0000019617"  # JPMorgan Chase
 HEADERS = {
@@ -38,22 +38,12 @@ def fetch_html_url_from_index(index_json_url):
             return index_json_url.rsplit("/", 1)[0] + "/" + item["name"]
     return None
 
-# === Step 3: Parse the <WholesaleCreditPortfolio> section ===
-def extract_wholesale_credit_section(url):
+# === Step 3: Parse and list unique XML tag names ===
+def extract_unique_tags(url):
     res = requests.get(url, headers=HEADERS)
     soup = BeautifulSoup(res.content, "lxml-xml")
-    section = soup.find("WholesaleCreditPortfolio")
-
-    if not section:
-        return None
-
-    entries = []
-    for el in section.find_all():
-        tag = el.name
-        value = el.get_text(strip=True)
-        if tag and value:
-            entries.append((tag, value))
-    return entries
+    tag_names = set(el.name for el in soup.find_all())
+    return sorted(tag_names)
 
 # === Streamlit UI ===
 st.subheader("🔍 Step 1: Fetch Latest 10‑Q Filing from SEC")
@@ -69,14 +59,13 @@ if st.button("Fetch Latest 10‑Q HTML Link"):
     else:
         st.warning("⚠️ No recent 10‑Q filing found for JPMorgan.")
 
-# === Extract <WholesaleCreditPortfolio> from selected filing ===
+# === Extract and show unique tags ===
 if "html_url" in st.session_state:
-    st.subheader("📤 Step 2: Extract <WholesaleCreditPortfolio> Section")
-    if st.button("Parse and Display"):
-        data = extract_wholesale_credit_section(st.session_state["html_url"])
-        if data:
-            st.subheader("📊 Extracted Wholesale Credit Exposure")
-            for tag, val in data:
-                st.markdown(f"**{tag}**: {val}")
+    st.subheader("📤 Step 2: Display All Tag Names")
+    if st.button("List All Tags"):
+        tags = extract_unique_tags(st.session_state["html_url"])
+        if tags:
+            st.subheader(f"🏷️ Found {len(tags)} unique tags")
+            st.code("\n".join(tags))
         else:
-            st.warning("❗ <WholesaleCreditPortfolio> section not found in the report.")
+            st.warning("No tags found in the selected document.")
