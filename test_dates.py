@@ -4,7 +4,7 @@ from bs4 import BeautifulSoup
 
 # === Configuration ===
 st.set_page_config(page_title="SEC 10‑Q Parser", layout="wide")
-st.title("📄 SEC EDGAR 10‑Q HTML Parser - Tag List Only")
+st.title("📄 SEC EDGAR 10‑Q HTML Parser - All Elements Display")
 
 CIK = "0000019617"  # JPMorgan Chase
 HEADERS = {
@@ -38,12 +38,17 @@ def fetch_html_url_from_index(index_json_url):
             return index_json_url.rsplit("/", 1)[0] + "/" + item["name"]
     return None
 
-# === Step 3: Parse and list unique XML tag names ===
-def extract_unique_tags(url):
+# === Step 3: Parse and list all elements and their values ===
+def extract_all_elements(url):
     res = requests.get(url, headers=HEADERS)
     soup = BeautifulSoup(res.content, "lxml-xml")
-    tag_names = set(el.name for el in soup.find_all())
-    return sorted(tag_names)
+    elements = []
+    for el in soup.find_all():
+        tag = el.name
+        value = el.get_text(strip=True)
+        if tag:
+            elements.append((tag, value))
+    return elements
 
 # === Streamlit UI ===
 st.subheader("🔍 Step 1: Fetch Latest 10‑Q Filing from SEC")
@@ -59,13 +64,14 @@ if st.button("Fetch Latest 10‑Q HTML Link"):
     else:
         st.warning("⚠️ No recent 10‑Q filing found for JPMorgan.")
 
-# === Extract and show unique tags ===
+# === Extract and show all tag names and values ===
 if "html_url" in st.session_state:
-    st.subheader("📤 Step 2: Display All Tag Names")
-    if st.button("List All Tags"):
-        tags = extract_unique_tags(st.session_state["html_url"])
-        if tags:
-            st.subheader(f"🏷️ Found {len(tags)} unique tags")
-            st.code("\n".join(tags))
+    st.subheader("📤 Step 2: Display All Elements and Values")
+    if st.button("Parse All Elements"):
+        elements = extract_all_elements(st.session_state["html_url"])
+        if elements:
+            st.subheader(f"📚 Parsed {len(elements)} Elements")
+            for tag, val in elements:
+                st.markdown(f"**{tag}**: {val}")
         else:
-            st.warning("No tags found in the selected document.")
+            st.warning("No elements found in the selected document.")
