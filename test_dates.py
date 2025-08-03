@@ -9,7 +9,6 @@ import re
 st.set_page_config(page_title="Wells Fargo 10-Q Filings", layout="wide")
 st.title("📄 Wells Fargo 10-Q Filing Dashboard")
 
-# URL for Wells Fargo Filings
 WFC_FILINGS_URL = "https://www.wellsfargo.com/about/investor-relations/filings/"
 
 @st.cache_data(show_spinner=True)
@@ -22,7 +21,6 @@ def parse_wfc_filings_html(html):
     soup = BeautifulSoup(html, "html.parser")
     filings = []
 
-    # Find all anchor tags that mention "10-Q"
     for link in soup.find_all("a", href=True):
         text = link.get_text(strip=True)
         href = link["href"]
@@ -57,11 +55,11 @@ def parse_wfc_filings_html(html):
 
     return pd.DataFrame(filings)
 
-# Main execution
+# Fetch and parse
 html = fetch_wfc_html()
 df = parse_wfc_filings_html(html)
 
-# Display full HTML content for inspection
+# Show full HTML for inspection
 with st.expander("🔍 Show Full HTML Content"):
     st.text_area(
         label="WFC Filings Page HTML",
@@ -71,7 +69,7 @@ with st.expander("🔍 Show Full HTML Content"):
         key="html_display"
     )
 
-# If no 10-Q filings found
+# Main dashboard
 if df.empty:
     st.warning("No 10-Q filings found.")
 else:
@@ -79,8 +77,8 @@ else:
     st.dataframe(df.sort_values("date", ascending=False))
 
     st.header("📊 Filing Analytics")
-
     col1, col2 = st.columns(2)
+
     with col1:
         fig = px.scatter(df, x="date", y="quarter", color="year", title="10-Q Filing Dates by Quarter")
         st.plotly_chart(fig)
@@ -90,6 +88,32 @@ else:
         fig2 = px.bar(count_df, x="quarter", y="count", color="year", title="Filing Count by Quarter & Year")
         st.plotly_chart(fig2)
 
-    # Download CSV
+    # Downloads
+    st.header("⬇️ Export Filings Data")
+
     csv = df.to_csv(index=False)
-    st.download_button("📥 Download CSV", data=csv, file_name="wfc_10q_filings.csv")
+    st.download_button("📥 Download as CSV", data=csv, file_name="wfc_10q_filings.csv")
+
+    styled_html = f"""
+    <html>
+    <head>
+    <style>
+        body {{ font-family: Arial, sans-serif; padding: 20px; }}
+        table {{ border-collapse: collapse; width: 100%; }}
+        th, td {{ border: 1px solid #dddddd; text-align: left; padding: 8px; }}
+        th {{ background-color: #f2f2f2; }}
+    </style>
+    </head>
+    <body>
+    <h2>Wells Fargo 10-Q Filings</h2>
+    {df.to_html(index=False, escape=False)}
+    </body>
+    </html>
+    """
+
+    st.download_button(
+        "📥 Download as HTML",
+        data=styled_html,
+        file_name="wfc_10q_filings.html",
+        mime="text/html"
+    )
