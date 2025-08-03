@@ -1,263 +1,157 @@
 import streamlit as st
 import pandas as pd
+from bs4 import BeautifulSoup
+import re
+from datetime import datetime
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
-from yahooquery import Ticker
-from selenium.webdriver import Chrome
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from seleniumwire import webdriver
-from bs4 import BeautifulSoup
-import requests
-import re
-import xml.etree.ElementTree as ET
-from sec_api import QueryApi
-import tabula
-import numpy as np
 
-# SEC API configuration
-SEC_API_KEY = "b48426e1ec0d314f153b9d1b9f0421bc1aaa6779d25ea56bfc05bf235393478c"
-query_api = QueryApi(api_key=SEC_API_KEY)
+st.set_page_config(page_title="Bank 10‑Q Dashboard", layout="wide")
+st.title("📄 Major Bank 10-Q Filing Analysis")
 
-# Major Investment Banks and their CIK numbers
-BANKS = {
-    'JPMorgan Chase': '0000019617',
-    'Goldman Sachs': '0000886982',
-    'Morgan Stanley': '0000895421',
-    'Bank of America': '0000070858',
-    'Citigroup': '0000831001'
-}
-
-# Define major sectors and their corresponding ETFs
-SECTOR_ETFS = {
-    'Financial Services': 'XLF',
-    'Technology': 'XLK',
-    'Healthcare': 'XLV',
-    'Consumer Discretionary': 'XLY',
-    'Industrial': 'XLI',
-    'Energy': 'XLE',
-    'Materials': 'XLB',
-    'Consumer Staples': 'XLP',
-    'Utilities': 'XLU',
-    'Real Estate': 'XLRE'
-}
-
-class SectorAnalyzer:
-    def __init__(self):
-        self.etfs = SECTOR_ETFS
-        
-    def fetch_sector_performance(self):
-        performance_data = []
-        
-        # Batch process ETFs for better performance
-        symbols = list(self.etfs.values())
-        tickers = Ticker(symbols, asynchronous=True)
-        
-        # Get historical data for all ETFs
-        hist_data = tickers.history(period='1y')
-        
-        # Get additional info for all ETFs
-        quotes = tickers.quotes
-        
-        for sector, symbol in self.etfs.items():
-            try:
-                # Extract single symbol data
-                symbol_hist = hist_data.xs(symbol, level=0) if isinstance(hist_data, pd.DataFrame) else None
-                
-                if symbol_hist is not None:
-                    returns = symbol_hist['close'].pct_change()
-                    ytd_return = ((symbol_hist['close'][-1] / symbol_hist['close'][0]) - 1) * 100
+def parse_bac_filings(html_content):
+    """Parse Bank of America 10-Q filings from the HTML content"""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    filings = []
+    
+    # Find all rows containing 10-Q filings
+    for row in soup.find_all('tr'):
+        cells = row.find_all(['td', 'th'])
+        if len(cells) >= 3:  # Ensure row has enough cells
+            date_cell = cells[0].get_text(strip=True)
+            form_cell = cells[1].get_text(strip=True)
+            
+            if '10-Q' in form_cell:
+                try:
+                    # Parse date
+                    date = datetime.strptime(date_cell, '%m/%d/%y')
                     
-                    performance = {
-                        'Sector': sector,
-                        'ETF': symbol,
-                        'YTD_Return': ytd_return,
-                        'Volatility': returns.std() * 100,
-                        'Current_Price': symbol_hist['close'][-1],
-                        'Volume': symbol_hist['volume'].mean(),
-                        'Market_Cap': quotes[symbol]['marketCap'] if symbol in quotes else None
-                    }
-                    performance_data.append(performance)
-            
-            except Exception as e:
-                st.warning(f"Error processing {symbol}: {str(e)}")
-                continue
+                    # Get document links
+                    doc_links = []
+                    for link in row.find_all('a'):
+                        if 'Documents' in link.get_text(strip=True):
+                            doc_links.append(link.get('href', ''))
+                    
+                    filings.append({
+                        'date': date,
+                        'form': form_cell,
+                        'bank': 'Bank of America',
+                        'doc_links': doc_links,
+                        'quarter': (date.month - 1) // 3 + 1,
+                        'year': date.year
+                    })
+                except ValueError:
+                    continue
+    
+    return pd.DataFrame(filings)
+
+def parse_jpm_filings(html_content):
+    """Parse JP Morgan 10-Q filings from the HTML content"""
+    soup = BeautifulSoup(html_content, 'html.parser')
+    filings = []
+    
+    # Find all rows containing 10-Q filings
+    for row in soup.find_all('tr'):
+        date_cell = row.find('td', text=re.compile(r'\d{2}/\d{2}/\d{4}'))
+        form_cell = row.find('td', text='10-Q')
         
-        return pd.DataFrame(performance_data)
+        if date_cell and form_cell:
+            try:
+                # Parse date
+                date = datetime.strptime(date_cell.get_text(strip=True), '%m/%d/%Y')
+                
+                # Get document links
+                doc_links = []
+                for link in row.find_all('a'):
+                    if 'View HTML' in link.get_text(strip=True) or '.pdf' in link.get('href', ''):
+                        doc_links.append(link.get('href', ''))
+                
+                filings.append({
+                    'date': date,
+                    'form': '10-Q',
+                    'bank': 'JPMorgan Chase',
+                    'doc_links': doc_links,
+                    'quarter': (date.month - 1) // 3 + 1,
+                    'year': date.year
+                })
+            except ValueError:
+                continue
+    
+    return pd.DataFrame(filings)
 
-    def get_sector_holdings(self, etf_symbol):
-        try:
-            ticker = Ticker(etf_symbol)
-            holdings = ticker.fund_holding_info
-            
-            if holdings and 'holdings' in holdings[etf_symbol]:
-                holdings_df = pd.DataFrame(holdings[etf_symbol]['holdings'])
-                # Add additional metrics
-                holdings_df['marketValue'] = holdings_df['holdingPercent'] * ticker.price[etf_symbol]['regularMarketPrice']
-                return holdings_df
-            
-            return pd.DataFrame()
-            
-        except Exception as e:
-            st.warning(f"Error fetching holdings for {etf_symbol}: {str(e)}")
-            return pd.DataFrame()
-
-    def get_sector_fundamentals(self, etf_symbol):
-        try:
-            ticker = Ticker(etf_symbol)
-            
-            # Fetch various fundamental data
-            summary = ticker.summary_detail
-            profile = ticker.fund_profile
-            performance = ticker.fund_performance
-            
-            fundamentals = {
-                'PE_Ratio': summary[etf_symbol].get('trailingPE'),
-                'Expense_Ratio': profile[etf_symbol].get('feesExpensesInvestment', {}).get('annualReportExpenseRatio'),
-                'Beta': summary[etf_symbol].get('beta'),
-                'YTD_Return': performance[etf_symbol].get('performanceOverview', {}).get('ytd'),
-                'Category': profile[etf_symbol].get('categoryName')
-            }
-            
-            return fundamentals
-            
-        except Exception as e:
-            st.warning(f"Error fetching fundamentals for {etf_symbol}: {str(e)}")
-            return {}
-
-# [Previous EDGARScraper and CreditExposureAnalyzer classes remain the same]
+def analyze_filings(df):
+    """Analyze filing patterns and create visualizations"""
+    
+    # Filing timeline
+    fig_timeline = px.scatter(df, 
+                            x='date', 
+                            y='bank',
+                            color='bank',
+                            title='10-Q Filing Timeline',
+                            labels={'date': 'Filing Date', 'bank': 'Bank'})
+    st.plotly_chart(fig_timeline)
+    
+    # Quarterly filing patterns
+    quarterly_counts = df.groupby(['year', 'quarter', 'bank']).size().reset_index(name='count')
+    fig_quarterly = px.bar(quarterly_counts,
+                          x='quarter',
+                          y='count',
+                          color='bank',
+                          facet_col='year',
+                          title='Quarterly Filing Patterns',
+                          labels={'quarter': 'Quarter', 'count': 'Number of Filings'})
+    st.plotly_chart(fig_quarterly)
+    
+    # Filing intervals
+    df_sorted = df.sort_values('date')
+    df_sorted['days_between_filings'] = df_sorted.groupby('bank')['date'].diff().dt.days
+    
+    fig_intervals = px.box(df_sorted[df_sorted['days_between_filings'].notna()],
+                          x='bank',
+                          y='days_between_filings',
+                          title='Days Between Filings Distribution',
+                          labels={'days_between_filings': 'Days', 'bank': 'Bank'})
+    st.plotly_chart(fig_intervals)
 
 def main():
-    st.title("Enhanced Sector Analysis Dashboard")
+    # Process Bank of America filings
+    bac_df = parse_bac_filings(st.session_state.get('bac_html', ''))
     
-    sector_analyzer = SectorAnalyzer()
+    # Process JP Morgan filings
+    jpm_df = parse_jpm_filings(st.session_state.get('jpm_html', ''))
     
-    # Sidebar for filters and controls
-    st.sidebar.header("Analysis Controls")
-    analysis_type = st.sidebar.selectbox(
-        "Select Analysis Type",
-        ["Sector Performance", "Credit Exposure", "Combined Analysis"]
-    )
+    # Combine dataframes
+    combined_df = pd.concat([bac_df, jpm_df], ignore_index=True)
     
-    selected_sectors = st.sidebar.multiselect(
-        "Select Sectors",
-        list(SECTOR_ETFS.keys()),
-        default=list(SECTOR_ETFS.keys())[:3]
-    )
-    
-    # Fetch and cache sector performance data
-    @st.cache_data(ttl=3600)
-    def get_cached_sector_data():
-        return sector_analyzer.fetch_sector_performance()
-    
-    sector_df = get_cached_sector_data()
-    filtered_df = sector_df[sector_df['Sector'].isin(selected_sectors)]
-    
-    if analysis_type in ["Sector Performance", "Combined Analysis"]:
-        st.header("Sector Performance Overview")
+    if not combined_df.empty:
+        st.header("Filing Analysis")
         
-        # Performance metrics
+        # Summary metrics
         col1, col2, col3 = st.columns(3)
         with col1:
-            st.metric(
-                "Best Performing Sector",
-                f"{filtered_df.iloc[filtered_df['YTD_Return'].argmax()]['Sector']}", 
-                f"{filtered_df['YTD_Return'].max():.2f}%"
-            )
+            st.metric("Total Filings", len(combined_df))
         with col2:
-            st.metric(
-                "Most Volatile Sector",
-                f"{filtered_df.iloc[filtered_df['Volatility'].argmax()]['Sector']}", 
-                f"{filtered_df['Volatility'].max():.2f}%"
-            )
+            st.metric("Latest Filing", combined_df['date'].max().strftime('%Y-%m-%d'))
         with col3:
-            st.metric(
-                "Largest Sector by Market Cap",
-                f"{filtered_df.iloc[filtered_df['Market_Cap'].argmax()]['Sector']}", 
-                f"${filtered_df['Market_Cap'].max()/1e9:.2f}B"
-            )
+            st.metric("Banks Covered", combined_df['bank'].nunique())
         
-        # YTD Returns Chart
-        fig_returns = px.bar(
-            filtered_df,
-            x='Sector',
-            y='YTD_Return',
-            title='YTD Returns by Sector',
-            color='YTD_Return',
-            color_continuous_scale='RdYlGn'
-        )
-        st.plotly_chart(fig_returns)
+        # Display detailed analysis
+        analyze_filings(combined_df)
         
-        # Risk vs Return Analysis
-        fig_scatter = px.scatter(
-            filtered_df,
-            x='Volatility',
-            y='YTD_Return',
-            size='Market_Cap',
-            text='Sector',
-            title='Risk vs Return Analysis',
-            hover_data=['ETF'],
-            size_max=60
-        )
-        st.plotly_chart(fig_scatter)
-    
-    if analysis_type in ["Credit Exposure", "Combined Analysis"]:
-        st.header("Credit Exposure Analysis")
-        
-        # Fetch credit exposure data
-        with st.spinner("Fetching credit exposure data from investment banks..."):
-            credit_exposure_data = fetch_credit_exposure_data()
-            sector_risk = analyze_sector_credit_risk(credit_exposure_data)
-        
-        # Display credit exposure analysis
-        fig_heatmap = px.imshow(
-            credit_exposure_data.pivot(index='sector', columns='bank', values='exposure'),
-            aspect='auto',
-            title='Credit Exposure Heatmap by Bank and Sector'
-        )
-        st.plotly_chart(fig_heatmap)
-    
-    # Detailed Sector Analysis
-    st.header("Detailed Sector Analysis")
-    selected_sector = st.selectbox("Select Sector for Detailed Analysis", selected_sectors)
-    selected_etf = SECTOR_ETFS[selected_sector]
-    
-    # Fetch and display holdings
-    with st.spinner("Fetching sector holdings..."):
-        holdings_df = sector_analyzer.get_sector_holdings(selected_etf)
-        fundamentals = sector_analyzer.get_sector_fundamentals(selected_etf)
-        
-        if not holdings_df.empty:
-            # Display fundamental metrics
-            st.subheader("ETF Fundamentals")
-            metrics_cols = st.columns(4)
-            with metrics_cols[0]:
-                st.metric("P/E Ratio", f"{fundamentals.get('PE_Ratio', 'N/A'):.2f}")
-            with metrics_cols[1]:
-                st.metric("Expense Ratio", f"{fundamentals.get('Expense_Ratio', 'N/A'):.2%}")
-            with metrics_cols[2]:
-                st.metric("Beta", f"{fundamentals.get('Beta', 'N/A'):.2f}")
-            with metrics_cols[3]:
-                st.metric("Category", fundamentals.get('Category', 'N/A'))
+        # Raw data view
+        if st.checkbox("Show Raw Data"):
+            st.dataframe(combined_df.sort_values('date', ascending=False))
             
-            # Display holdings
-            st.subheader("Top Holdings")
-            fig_holdings = px.treemap(
-                holdings_df.head(10),
-                path=[px.Constant("All"), 'symbol'],
-                values='holdingPercent',
-                title='Top 10 Holdings Distribution'
-            )
-            st.plotly_chart(fig_holdings)
-            
-            # Detailed holdings table
-            st.dataframe(
-                holdings_df.head(10).style.format({
-                    'holdingPercent': '{:.2%}',
-                    'marketValue': '${:,.2f}'
-                })
-            )
+        # Download option
+        csv = combined_df.to_csv(index=False)
+        st.download_button(
+            label="Download Filing Data",
+            data=csv,
+            file_name="bank_filings.csv",
+            mime="text/csv"
+        )
+    else:
+        st.warning("No filing data available. Please ensure the HTML content is properly loaded.")
 
 if __name__ == "__main__":
     main()
