@@ -1,77 +1,69 @@
 import streamlit as st
-import requests
-from bs4 import BeautifulSoup
+import pandas as pd
+from sec_api import QueryApi, ExtractorApi
 
-# === Configuration ===
-st.set_page_config(page_title="SEC 10‑Q Parser", layout="wide")
-st.title("📄 SEC EDGAR 10‑Q HTML Parser - All Elements Display")
+# --- Configuration ---
+SEC_API_KEY = "b48426e1ec0d314f153b9d1b9f0421bc1aaa6779d25ea56bfc05bf235393478c"  # Replace with your actual SEC API key
 
-CIK = "0000019617"  # JPMorgan Chase
-HEADERS = {
-    "User-Agent": "segaab120@gmail.com"
+query_api = QueryApi(api_key=SEC_API_KEY)
+extractor_api = ExtractorApi(api_key=SEC_API_KEY)
+
+# --- Bank Ticker to CIK Mapping ---
+bank_ciks = {
+    "JPM": "0000019617",
+    "BAC": "0000070858",
+    "GS": "0000886982"
 }
 
-# === Step 1: Fetch latest 10-Q index JSON URL from EDGAR ===
-@st.cache_data(show_spinner=False)
-def fetch_latest_10q_html():
-    index_url = f"https://data.sec.gov/submissions/CIK{CIK}.json"
-    res = requests.get(index_url, headers=HEADERS)
-    res.raise_for_status()
-    data = res.json()
+# --- Functions ---
 
-    filings = data.get("filings", {}).get("recent", {})
-    for i, form in enumerate(filings.get("form", [])):
-        if form == "10-Q":
-            accession = filings["accessionNumber"][i].replace("-", "")
-            cik_int = int(CIK)
-            return f"https://www.sec.gov/Archives/edgar/data/{cik_int}/{accession}/index.json"
-    return None
+@st.cache_data
+def get_latest_10q_url(cik):
+    query = {
+        "query": {
+            "query_string": {
+                "query": f"cik:{cik} AND formType:\"10-Q\""
+            }
+        },
+        "from": "0",
+        "size": "1",
+        "sort": [{ "filedAt": { "order": "desc" } }]
+    }
+    response = query_api.get_filings(query)
+    try:
+        return response["filings"][0]["linkToFilingDetails"]
+    except IndexError:
+        return None
 
-# === Step 2: Get .htm or .xml report from index ===
-def fetch_html_url_from_index(index_json_url):
-    res = requests.get(index_json_url, headers=HEADERS)
-    res.raise_for_status()
-    index = res.json()
-    for item in index["directory"]["item"]:
-        name = item["name"].lower()
-        if name.endswith(".htm") or name.endswith(".xml"):
-            return index_json_url.rsplit("/", 1)[0] + "/" + item["name"]
-    return None
+@st.cache_data
+def extract_credit_exposure_paragraph(filing_url):
+    try:
+        section_text = extractor_api.get_section(filing_url, "part2item7", "text")
+        lines = section_text.splitlines()
+        credit_related = [line.strip() for line in lines if "credit" in line.lower() or "exposure" in line.lower()]
+        return "\n".join(credit_related[:8]) if credit_related else "No credit exposure data found."
+    except Exception as e:
+        return f"Error extracting data: {str(e)}"
 
-# === Step 3: Parse and list all elements and their values ===
-def extract_all_elements(url):
-    res = requests.get(url, headers=HEADERS)
-    soup = BeautifulSoup(res.content, "lxml-xml")
-    elements = []
-    for el in soup.find_all():
-        tag = el.name
-        value = el.get_text(strip=True)
-        if tag:
-            elements.append((tag, value))
-    return elements
+# --- Streamlit UI ---
+st.title("📄 Bank Wholesale Credit Exposure Dashboard")
 
-# === Streamlit UI ===
-st.subheader("🔍 Step 1: Fetch Latest 10‑Q Filing from SEC")
-if st.button("Fetch Latest 10‑Q HTML Link"):
-    index_url = fetch_latest_10q_html()
-    if index_url:
-        html_url = fetch_html_url_from_index(index_url)
-        if html_url:
-            st.success(f"✅ Found report URL: [Open Filing]({html_url})")
-            st.session_state["html_url"] = html_url
-        else:
-            st.warning("⚠️ No HTML/XML report found in this filing.")
+st.markdown("This dashboard extracts **credit exposure mentions** from the latest 10-Q filings (Item 7) for major U.S. banks.")
+
+results = []
+
+for ticker, cik in bank_ciks.items():
+    st.subheader(f"🔍 {ticker}")
+    filing_url = get_latest_10q_url(cik)
+    if filing_url:
+        snippet = extract_credit_exposure_paragraph(filing_url)
+        st.markdown(f"**Filing URL:** [View Filing]({filing_url})")
+        st.code(snippet, language="markdown")
+        results.append({"Ticker": ticker, "Snippet": snippet, "URL": filing_url})
     else:
-        st.warning("⚠️ No recent 10‑Q filing found for JPMorgan.")
+        st.warning("No 10-Q filing found.")
 
-# === Extract and show all tag names and values ===
-if "html_url" in st.session_state:
-    st.subheader("📤 Step 2: Display All Elements and Values")
-    if st.button("Parse All Elements"):
-        elements = extract_all_elements(st.session_state["html_url"])
-        if elements:
-            st.subheader(f"📚 Parsed {len(elements)} Elements")
-            for tag, val in elements:
-                st.markdown(f"**{tag}**: {val}")
-        else:
-            st.warning("No elements found in the selected document.")
+# Optional: Export as DataFrame
+if results:
+    df = pd.DataFrame(results)
+    st.download_button("📥 Download CSV", df.to_csv(index=False), file_name="credit_exposure_snippets.csv")
