@@ -20,3 +20,4 @@ lxml
 pdfkit
 fpdf
 sec_api
+selenium 
