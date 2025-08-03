@@ -2,76 +2,74 @@ import streamlit as st
 import pandas as pd
 from sec_api import QueryApi, ExtractorApi
 
-SEC_API_KEY = "b48426e1ec0d314f153b9d1b9f0421bc1aaa6779d25ea56bfc05bf235393478c"
+SEC_API_KEY = "b48426e1ec0d314f153b9d1b9f0421bc1aaa6779d25ea56bfc05bf235393478c"  # Replace this
 query_api = QueryApi(api_key=SEC_API_KEY)
 extractor_api = ExtractorApi(api_key=SEC_API_KEY)
 
-# CIK and fallback URLs
+st.set_page_config(page_title="Sector Dashboard", layout="wide")
+st.title("🏦 Sector Dashboard: Credit Exposure (Item 2 - 10-Q)")
+st.markdown("Extracts **credit exposure** references from Item 2 of latest 10-Q filings for selected U.S. banks.")
+
+# List of banks
 bank_info = {
-    "JPM": {
-        "cik": "19617",
-        "fallback_url": "https://www.sec.gov/Archives/edgar/data/19617/000001961724000555/jpm-20241011.htm"
-    },
-    "BAC": {
-        "cik": "70858",
-        "fallback_url": "https://investor.bankofamerica.com/regulatory-and-other-filings/all-sec-filings/content/0000070858-25-000139/0000070858-25-000139.pdf"
-    },
-    "GS": {
-        "cik": "886982",
-        "fallback_url": "https://www.sec.gov/Archives/edgar/data/886982/000088698225000005/gs-20240331.htm"
-    }
+    "JPM": {"cik": "19617"},
+    "BAC": {"cik": "70858"},
+    "GS": {"cik": "886982"},
+    "MS": {"cik": "895421"},
+    "WFC": {"cik": "72971"},
 }
 
-st.set_page_config(page_title="Sector Dashboard", layout="wide")
-st.title("🏦 Sector Dashboard: Credit Exposure (Item 2)")
-st.markdown("Extracts **credit exposure** content from Item 2 of the latest 10-Q filings for major U.S. banks.")
-
 @st.cache_data
-def get_10q_filing_url(cik):
+def get_latest_10q_url(cik):
     query = {
-        "query": {"query_string": {"query": f"cik:{cik} AND formType:\"10-Q\""}},
-        "from": "0", "size": "10",
+        "query": {
+            "query_string": {
+                "query": f'cik:{cik} AND formType:"10-Q"'
+            }
+        },
+        "from": "0",
+        "size": "10",
         "sort": [{"filedAt": {"order": "desc"}}]
     }
     result = query_api.get_filings(query)
     filings = result.get("filings", [])
+    
     for filing in filings:
-        if filing.get("filingDate", "").startswith(("2025", "2024")):
+        form_type = filing.get("formType", "").upper()
+        if form_type == "10-Q" and filing.get("filingDate", "").startswith(("2025", "2024")):
             return filing["linkToFilingDetails"]
     return None
 
-def extract_credit_exposure(filing_url, ticker):
+def extract_item2_credit_mentions(filing_url):
     try:
         section = extractor_api.get_section(filing_url, "part1item2", "text")
         lines = [line.strip() for line in section.splitlines()]
-        filtered = [line for line in lines if "credit" in line.lower() or "exposure" in line.lower()]
-        return "\n".join(filtered[:10]) if filtered else "No credit exposure references found."
+        credit_lines = [line for line in lines if any(word in line.lower() for word in ["credit", "exposure", "lending", "default", "counterparty"])]
+        return "\n".join(credit_lines[:12]) if credit_lines else "No credit exposure references found."
     except Exception as e:
-        return f"⚠️ Error extracting: {str(e)}"
+        return f"⚠️ Extraction failed: {e}"
 
-# Display dashboard
+# Collect records
 records = []
+
 for ticker, info in bank_info.items():
     st.subheader(f"🔍 {ticker}")
-    filing_url = get_10q_filing_url(info["cik"])
-    fallback_used = False
-
-    if not filing_url:
-        filing_url = info["fallback_url"]
-        fallback_used = True
-
-    st.markdown(f"[Open Filing →]({filing_url})")
-    text = extract_credit_exposure(filing_url, ticker)
-    st.code(text, language="markdown")
-    if fallback_used:
-        st.warning("⚠️ Using manually sourced fallback URL.")
-
+    filing_url = get_latest_10q_url(info["cik"])
+    
+    if filing_url:
+        st.markdown(f"[📄 View Filing →]({filing_url})")
+        content = extract_item2_credit_mentions(filing_url)
+        st.code(content, language="text")
+    else:
+        content = "⚠️ No recent 10-Q filing found for 2024 or 2025."
+        st.warning(content)
+    
     records.append({
         "Ticker": ticker,
-        "Filing URL": filing_url,
-        "Credit Exposure": text[:500] + "..." if len(text) > 500 else text
+        "Filing URL": filing_url or "N/A",
+        "Summary": content[:500] + "..." if len(content) > 500 else content
     })
 
-# Download
+# Download results
 df = pd.DataFrame(records)
-st.download_button("📥 Download Data", df.to_csv(index=False), "sector_credit_exposure.csv")
+st.download_button("📥 Download Extracted Data", df.to_csv(index=False), "sector_credit_summary.csv")
