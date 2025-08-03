@@ -61,10 +61,17 @@ def parse_wfc_filings_html(html):
 html = fetch_wfc_html()
 df = parse_wfc_filings_html(html)
 
-# Display HTML debug
-with st.expander("🔍 Show Raw HTML"):
-    st.text_area("HTML Content", html[:3000] + "...", height=300)
+# Display full HTML content for inspection
+with st.expander("🔍 Show Full HTML Content"):
+    st.text_area(
+        label="WFC Filings Page HTML",
+        value=html,
+        height=800,
+        max_chars=None,
+        key="html_display"
+    )
 
+# If no 10-Q filings found
 if df.empty:
     st.warning("No 10-Q filings found.")
 else:
