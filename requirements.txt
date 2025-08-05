@@ -21,3 +21,6 @@ pdfkit
 fpdf
 sec_api
 selenium 
+scraper-edgar 
+supabase 
+pandas
