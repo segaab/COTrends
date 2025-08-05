@@ -1,119 +1,67 @@
-import streamlit as st
-import requests
-import pandas as pd
-from bs4 import BeautifulSoup
-from datetime import datetime
-import plotly.express as px
+from edgar import EdgarClient
 import re
+import pandas as pd
+from supabase import create_client, Client
+from datetime import datetime
+import uuid
 
-st.set_page_config(page_title="Wells Fargo 10-Q Filings", layout="wide")
-st.title("📄 Wells Fargo 10-Q Filing Dashboard")
+# --- Supabase setup ---
+SUPABASE_URL = "https://your-project.supabase.co"
+SUPABASE_KEY = "your-anon-or-service-role-key"
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-WFC_FILINGS_URL = "https://www.wellsfargo.com/about/investor-relations/filings/"
+# --- Edgar client ---
+client = EdgarClient()
 
-@st.cache_data(show_spinner=True)
-def fetch_wfc_html():
-    res = requests.get(WFC_FILINGS_URL)
-    res.raise_for_status()
-    return res.text
+# --- Investment banks to analyze ---
+tickers = ['GS', 'MS', 'JPM', 'BAC']
 
-def parse_wfc_filings_html(html):
-    soup = BeautifulSoup(html, "html.parser")
-    filings = []
+# --- Sector keywords (extendable) ---
+sectors = [
+    "energy", "real estate", "consumer discretionary", "industrials",
+    "financials", "technology", "utilities", "materials", "health care"
+]
 
-    for link in soup.find_all("a", href=True):
-        text = link.get_text(strip=True)
-        href = link["href"]
-
-        if "10-Q" in text and "Form" in text:
-            parent_li = link.find_parent("li")
-            if not parent_li:
-                continue
-
-            raw_text = parent_li.get_text(" ", strip=True)
-            date_match = re.search(r"Filed\s+([A-Za-z]+\s+\d{1,2},\s+\d{4})", raw_text)
-            quarter_match = re.search(r"Q([1-4])\s+(\d{4})", raw_text)
-
-            try:
-                if date_match:
-                    date = datetime.strptime(date_match.group(1), "%B %d, %Y")
-                else:
-                    continue
-
-                quarter = int(quarter_match.group(1)) if quarter_match else (date.month - 1) // 3 + 1
-
-                filings.append({
-                    "bank": "Wells Fargo",
-                    "date": date,
-                    "quarter": quarter,
-                    "year": date.year,
-                    "url": href
+# --- Helper to extract paragraphs containing sector exposure ---
+def extract_sector_paragraphs(text, cik, ticker, form_type, filing_date, filing_url):
+    results = []
+    paragraphs = text.split('\n')
+    for para in paragraphs:
+        for sector in sectors:
+            if sector in para.lower() and re.search(r'\$[\d,.]+', para):
+                results.append({
+                    "id": str(uuid.uuid4()),
+                    "cik": cik,
+                    "ticker": ticker,
+                    "filing_date": filing_date,
+                    "form_type": form_type,
+                    "sector": sector.title(),
+                    "exposure_text": para.strip(),
+                    "source_url": filing_url
                 })
-            except Exception as e:
-                print("Error parsing filing:", e)
-                continue
+    return results
 
-    return pd.DataFrame(filings)
+# --- Main scraping logic ---
+all_results = []
 
-# Fetch and parse
-html = fetch_wfc_html()
-df = parse_wfc_filings_html(html)
+for ticker in tickers:
+    filings = client.get_filings(ticker, form='10-Q', count=2)  # Latest 2 filings per bank
+    for filing in filings:
+        text = client.get_filing_text(filing.accession_no)
+        if text:
+            parsed = extract_sector_paragraphs(
+                text,
+                cik=filing.cik,
+                ticker=ticker,
+                form_type=filing.form,
+                filing_date=filing.filing_date,
+                filing_url=filing.primary_document_url
+            )
+            all_results.extend(parsed)
 
-# Show full HTML for inspection
-with st.expander("🔍 Show Full HTML Content"):
-    st.text_area(
-        label="WFC Filings Page HTML",
-        value=html,
-        height=800,
-        max_chars=None,
-        key="html_display"
-    )
-
-# Main dashboard
-if df.empty:
-    st.warning("No 10-Q filings found.")
+# --- Upload to Supabase ---
+if all_results:
+    response = supabase.table("sector_credit_exposure").insert(all_results).execute()
+    print("Inserted:", response.data)
 else:
-    st.header("🧾 Parsed 10-Q Filings Table")
-    st.dataframe(df.sort_values("date", ascending=False))
-
-    st.header("📊 Filing Analytics")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        fig = px.scatter(df, x="date", y="quarter", color="year", title="10-Q Filing Dates by Quarter")
-        st.plotly_chart(fig)
-
-    with col2:
-        count_df = df.groupby(["year", "quarter"]).size().reset_index(name="count")
-        fig2 = px.bar(count_df, x="quarter", y="count", color="year", title="Filing Count by Quarter & Year")
-        st.plotly_chart(fig2)
-
-    # Downloads
-    st.header("⬇️ Export Filings Data")
-
-    csv = df.to_csv(index=False)
-    st.download_button("📥 Download as CSV", data=csv, file_name="wfc_10q_filings.csv")
-
-    styled_html = f"""
-    <html>
-    <head>
-    <style>
-        body {{ font-family: Arial, sans-serif; padding: 20px; }}
-        table {{ border-collapse: collapse; width: 100%; }}
-        th, td {{ border: 1px solid #dddddd; text-align: left; padding: 8px; }}
-        th {{ background-color: #f2f2f2; }}
-    </style>
-    </head>
-    <body>
-    <h2>Wells Fargo 10-Q Filings</h2>
-    {df.to_html(index=False, escape=False)}
-    </body>
-    </html>
-    """
-
-    st.download_button(
-        "📥 Download as HTML",
-        data=styled_html,
-        file_name="wfc_10q_filings.html",
-        mime="text/html"
-    )
+    print("No relevant exposures found.")
