@@ -1,13 +1,18 @@
 from edgar import EdgarClient
-import re
-import pandas as pd
 from supabase import create_client, Client
+from dotenv import load_dotenv
 from datetime import datetime
+import pandas as pd
 import uuid
+import os
+import re
 
-# --- Supabase setup ---
-SUPABASE_URL = "https://your-project.supabase.co"
-SUPABASE_KEY = "your-anon-or-service-role-key"
+# --- Load environment variables ---
+load_dotenv()
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+# --- Initialize Supabase client ---
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- Edgar client ---
@@ -16,13 +21,13 @@ client = EdgarClient()
 # --- Investment banks to analyze ---
 tickers = ['GS', 'MS', 'JPM', 'BAC']
 
-# --- Sector keywords (extendable) ---
+# --- Sector keywords to match in filings ---
 sectors = [
     "energy", "real estate", "consumer discretionary", "industrials",
     "financials", "technology", "utilities", "materials", "health care"
 ]
 
-# --- Helper to extract paragraphs containing sector exposure ---
+# --- Helper to extract paragraphs mentioning sector exposure ---
 def extract_sector_paragraphs(text, cik, ticker, form_type, filing_date, filing_url):
     results = []
     paragraphs = text.split('\n')
@@ -45,7 +50,7 @@ def extract_sector_paragraphs(text, cik, ticker, form_type, filing_date, filing_
 all_results = []
 
 for ticker in tickers:
-    filings = client.get_filings(ticker, form='10-Q', count=2)  # Latest 2 filings per bank
+    filings = client.get_filings(ticker, form='10-Q', count=2)  # You can change to '10-K'
     for filing in filings:
         text = client.get_filing_text(filing.accession_no)
         if text:
@@ -62,6 +67,6 @@ for ticker in tickers:
 # --- Upload to Supabase ---
 if all_results:
     response = supabase.table("sector_credit_exposure").insert(all_results).execute()
-    print("Inserted:", response.data)
+    print("✅ Inserted records:", len(response.data))
 else:
-    print("No relevant exposures found.")
+    print("⚠️ No sector credit exposures found in this batch.")
