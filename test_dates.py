@@ -23,7 +23,7 @@ import numpy as np
 import requests
 import datetime as dt
 from fredapi import Fred
-import yfinance as yf
+import yahooquery as yf
 import os
 
 # ----------------------------
