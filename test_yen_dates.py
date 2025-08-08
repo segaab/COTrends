@@ -4,7 +4,6 @@ import numpy as np
 from datetime import datetime, timedelta
 from yahooquery import Ticker
 from sodapy import Socrata
-from sklearn.linear_model import LinearRegression
 import os
 
 st.set_page_config(page_title="Gold & Silver Health Gauge", layout="wide")
@@ -29,7 +28,7 @@ COT_LONG_TERM_WT = 0.60
 
 COT_LONG_TERM_WEEKS = 12
 
-LOOKBACK_DAYS_SPECTRUM = 30  # Last ~6 weeks for spectrum score
+LOOKBACK_DAYS_SPECTRUM = 30  # Last ~6 weeks approx
 
 # --- Fetch Yahoo Data ---
 @st.cache_data(ttl=3600)
@@ -212,78 +211,81 @@ def open_interest_score(df):
     else:
         return 1
 
-# --- New Detailed Spectrum Score for Price + Volume + Returns ---
+# --- Calculate Relative Volume (RVOL) ---
+def calculate_rvol(df):
+    df = df.copy()
+    df["Volume_MA20"] = df["Volume"].rolling(window=20).mean()
+    df["RVOL"] = df["Volume"] / df["Volume_MA20"]
+    df = df.dropna(subset=["RVOL"])
+    return df
+
+# --- Spectrum Score Calculation (rule based) ---
 def calculate_spectrum_score(df):
-    LOOKBACK_DAYS = LOOKBACK_DAYS_SPECTRUM
-    
     df = df.sort_values("date").copy()
-    if len(df) < LOOKBACK_DAYS + 1:
-        return 3  # Neutral default if insufficient data
-    
-    recent = df.iloc[-(LOOKBACK_DAYS + 1):].reset_index(drop=True)
-    
-    # Calculate daily returns (%)
-    recent['DailyReturn'] = recent['Close'].pct_change() * 100
-    
-    returns = recent['DailyReturn'].iloc[1:]  # drop first NaN
-    
-    # Assign weights per return scenario
-    weights = []
-    for r in returns:
-        if r >= 0:
-            # Accumulation return scenarios
-            if 0 <= r < 1:
-                weights.append(1)
-            elif 1 <= r < 2:
-                weights.append(2)
-            elif r >= 2:
-                weights.append(3)
+    # Use last 30 trading days
+    df = df.tail(LOOKBACK_DAYS_SPECTRUM + 4)  # +4 for ±4 hours approx (here daily data)
+    if len(df) < LOOKBACK_DAYS_SPECTRUM:
+        return 3  # neutral if insufficient data
+
+    df = calculate_rvol(df)
+    if df.empty:
+        return 3
+
+    # Calculate 78th percentile RVOL threshold
+    rvol_78th = df["RVOL"].quantile(0.78)
+
+    total_weight = 0
+    count = 0
+
+    # For each day with RVOL >= 78th percentile, examine ±4 hour window (~±0 days in daily data)
+    # Since data is daily, we consider the day itself as the spike window
+
+    for idx, row in df.iterrows():
+        if row["RVOL"] >= rvol_78th:
+            # Calculate daily return in %
+            if idx == 0:
+                continue  # no previous day to calc return
+            prev_close = df.loc[idx - 1, "Close"] if (idx - 1) in df.index else None
+            if prev_close is None or prev_close == 0:
+                continue
+            ret_pct = ((row["Close"] - prev_close) / prev_close) * 100
+
+            # Scenario weights according to your rules
+            if ret_pct >= 0:
+                # Accumulation scenarios
+                if 0 <= ret_pct < 1:
+                    weight = 1
+                elif 1 <= ret_pct < 2:
+                    weight = 2
+                elif ret_pct >= 2:
+                    weight = 3
+                else:
+                    weight = 0
             else:
-                weights.append(0)
-        else:
-            # Distribution return scenarios
-            if -1 <= r < 0:
-                weights.append(-1)
-            elif -2 <= r < -1:
-                weights.append(-2)
-            elif r < -2:
-                weights.append(-3)
-            else:
-                weights.append(0)
-    
-    accumulation_distribution_score = sum(weights)
-    
-    # Calculate trend weight with linear regression slope
-    prices = recent['Close'].values.reshape(-1, 1)
-    X = np.arange(len(prices)).reshape(-1, 1)
-    model = LinearRegression()
-    model.fit(X, prices)
-    slope = model.coef_[0][0]
-    
-    relative_slope = slope / prices[0][0]
-    
-    strong_threshold = 0.001
-    moderate_threshold = 0.0005
-    
-    if relative_slope > strong_threshold:
-        trend_weight = 3  # Strong uptrend
-    elif relative_slope > moderate_threshold:
-        trend_weight = 2  # Moderate uptrend
-    elif -moderate_threshold <= relative_slope <= moderate_threshold:
-        trend_weight = 0  # Sideways
-    elif relative_slope > -strong_threshold:
-        trend_weight = -2  # Moderate downtrend
-    else:
-        trend_weight = -3  # Strong downtrend
-    
-    combined_score = accumulation_distribution_score + trend_weight
-    
-    # Normalize combined score to 0-5 scale
-    min_score = -93  # 30 * (-3.0) + (-3)
-    max_score = 93   # 30 * 3 + 3
-    norm_score = (combined_score - min_score) / (max_score - min_score) * 5
+                # Distribution scenarios
+                if -1 <= ret_pct < 0:
+                    weight = -1
+                elif -2 <= ret_pct < -1:
+                    weight = -2
+                elif ret_pct < -2:
+                    weight = -3
+                else:
+                    weight = 0
+
+            total_weight += weight
+            count += 1
+
+    if count == 0:
+        # No significant RVOL spikes found, treat as neutral
+        return 3
+
+    # Normalize score from aggregated weights over count, scale approx 0-5
+    avg_weight = total_weight / count
+
+    # Map avg_weight (which can range roughly from -3 to 3) to 0-5 scale
+    norm_score = (avg_weight + 3) / 6 * 5
     norm_score = max(0, min(5, norm_score))
-    
+
     return norm_score
 
 # --- Compute Overall Health ---
@@ -332,20 +334,19 @@ for i, market in enumerate(COT_MARKETS):
         if not yahoo_symbol:
             st.error(f"Yahoo symbol for {market} not found.")
             continue
-        
-        # Fetch Data
+
         yahoo_df = fetch_yahoo_data(yahoo_symbol, start_date, end_date)
         cot_df = fetch_cot_data(market)
-        
+
         if yahoo_df.empty:
             st.warning("No Yahoo data available.")
             continue
         if cot_df.empty:
             st.warning("No COT data available.")
             continue
-        
+
         health, pv_score, cot_score, oi_score = compute_asset_health(yahoo_df, cot_df, market)
-        
+
         st.markdown(f"**Health Gauge Score:** {health} / 5  {health_color(health)}")
         st.write(f"- Price + Volume Spectrum Score: {pv_score:.2f}")
         st.write(f"- COT Score (Short+Long Term): {cot_score:.2f}")
