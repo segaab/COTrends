@@ -52,9 +52,7 @@ def get_cot_data(market):
     try:
         client = Socrata(
             "publicreporting.cftc.gov",
-            os.getenv("MY_APP_TOKEN"),
-            username=os.getenv("CFTC_USERNAME"),
-            password=os.getenv("CFTC_PASSWORD"),
+            "WSCaavlIcDgtLVZbJA1FKkq40"
         )
         result = client.get("6dca-aqww", where=f"market_and_exchange_names = '{market}'", limit=5000)
         df = pd.DataFrame.from_records(result)
