@@ -49,22 +49,27 @@ def fetch_yahooquery_data(tickers, start, end):
     """
     ticker_obj = Ticker(tickers)
     df = ticker_obj.history(start=start.strftime('%Y-%m-%d'), end=(end + dt.timedelta(days=1)).strftime('%Y-%m-%d'), interval='1d')
-    # yahooquery returns MultiIndex DataFrame with level 0 = ticker, level 1 = datetime
+
     if df.empty:
         return {t: pd.DataFrame() for t in tickers}
-    if isinstance(df.index, pd.MultiIndex):
-        df = df.reset_index(level=0, drop=False)
-    else:
-        # unexpected format, wrap into dict
-        return {t: df for t in tickers}
 
-    dfs = {}
-    for t in tickers:
-        df_t = df[df['symbol'] == t].copy()
-        df_t.index = pd.to_datetime(df_t['date'])
-        df_t = df_t.loc[(df_t.index >= start) & (df_t.index <= end)]
-        dfs[t] = df_t
-    return dfs
+    # If MultiIndex, level 0 = ticker, level 1 = datetime
+    if isinstance(df.index, pd.MultiIndex):
+        dfs = {}
+        for t in tickers:
+            try:
+                df_t = df.loc[t].copy()
+            except KeyError:
+                dfs[t] = pd.DataFrame()
+                continue
+            df_t.index = pd.to_datetime(df_t.index)
+            df_t = df_t.loc[(df_t.index >= start) & (df_t.index <= end)]
+            dfs[t] = df_t
+        return dfs
+
+    # Single ticker or no MultiIndex (unlikely for multiple tickers)
+    df.index = pd.to_datetime(df.index)
+    return {tickers[0]: df.loc[(df.index >= start) & (df.index <= end)]}
 
 # ----------------------------
 # Fetch FRED series helper (with caching)
@@ -195,9 +200,9 @@ use_cache = (
 )
 
 if use_cache:
-    zq_df = pd.read_csv(zq_cache_path, parse_dates=['date']).set_index('date')
-    gold_df = pd.read_csv(gold_cache_path, parse_dates=['date']).set_index('date')
-    silver_df = pd.read_csv(silver_cache_path, parse_dates=['date']).set_index('date')
+    zq_df = pd.read_csv(zq_cache_path, index_col=0, parse_dates=True)
+    gold_df = pd.read_csv(gold_cache_path, index_col=0, parse_dates=True)
+    silver_df = pd.read_csv(silver_cache_path, index_col=0, parse_dates=True)
 else:
     dfs = fetch_yahooquery_data(['ZQ=F', 'GC=F', 'SI=F'], start_date, end_date + dt.timedelta(days=30))
     zq_df = dfs.get('ZQ=F', pd.DataFrame())
