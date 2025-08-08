@@ -20,7 +20,6 @@ lxml
 pdfkit
 fpdf
 sec_api
-selenium 
-scraper-edgar 
+selenium  
 supabase 
 pandas
