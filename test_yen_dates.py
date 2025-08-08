@@ -85,8 +85,6 @@ def fetch_yahoo_data(symbol, start, end):
 def fetch_cot_data(market_name):
     # Load CFTC credentials from env vars
     app_token = "WSCaavlIcDgtLVZbJA1FKkq40"
-    username = os.getenv("CFTC_USERNAME")
-    password = os.getenv("CFTC_PASSWORD")
 
     if not (app_token and username and password):
         st.warning("Missing CFTC Socrata credentials in environment variables. COT data will not load.")
@@ -95,8 +93,6 @@ def fetch_cot_data(market_name):
     client = Socrata(
         "publicreporting.cftc.gov",
         app_token,
-        username=username,
-        password=password,
         timeout=30
     )
 
