@@ -349,4 +349,4 @@ for i, market in enumerate(COT_MARKETS):
         st.markdown(f"**Health Gauge Score:** {health} / 5  {health_color(health)}")
         st.write(f"- Price + Volume Spectrum Score: {pv_score:.2f}")
         st.write(f"- COT Score (Short+Long Term): {cot_score:.2f}")
-        st.write(f"- Open Interest Score: {oi_score:.2f}"
+        st.write(f"- Open Interest Score: {oi_score:.2f}")
