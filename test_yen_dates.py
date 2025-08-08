@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from yahooquery import Ticker
 from sodapy import Socrata
 import os
+from sklearn.linear_model import LinearRegression
 
 st.set_page_config(page_title="Gold & Silver Health Gauge", layout="wide")
 
@@ -27,8 +28,7 @@ COT_SHORT_TERM_WT = 0.40
 COT_LONG_TERM_WT = 0.60
 
 COT_LONG_TERM_WEEKS = 12
-
-LOOKBACK_DAYS_SPECTRUM = 30  # Last ~6 weeks approx
+LOOKBACK_DAYS_SPECTRUM = 30  # ~6 weeks approx
 
 # --- Fetch Yahoo Data ---
 @st.cache_data(ttl=3600)
@@ -219,11 +219,11 @@ def calculate_rvol(df):
     df = df.dropna(subset=["RVOL"])
     return df
 
-# --- Spectrum Score Calculation (rule based) ---
+# --- Spectrum Score Calculation with scikit-learn trend detection ---
 def calculate_spectrum_score(df):
     df = df.sort_values("date").copy()
-    # Use last 30 trading days
-    df = df.tail(LOOKBACK_DAYS_SPECTRUM + 4)  # +4 for ±4 hours approx (here daily data)
+    # Use last 30 trading days approx
+    df = df.tail(LOOKBACK_DAYS_SPECTRUM)
     if len(df) < LOOKBACK_DAYS_SPECTRUM:
         return 3  # neutral if insufficient data
 
@@ -237,56 +237,77 @@ def calculate_spectrum_score(df):
     total_weight = 0
     count = 0
 
-    # For each day with RVOL >= 78th percentile, examine ±4 hour window (~±0 days in daily data)
-    # Since data is daily, we consider the day itself as the spike window
+    # Accumulation and Distribution return scenarios weights
+    def accumulation_weight(ret_pct):
+        if 0 <= ret_pct < 1:
+            return 1
+        elif 1 <= ret_pct < 2:
+            return 2
+        elif ret_pct >= 2:
+            return 3
+        return 0
 
-    for idx, row in df.iterrows():
+    def distribution_weight(ret_pct):
+        if -1 <= ret_pct < 0:
+            return -1
+        elif -2 <= ret_pct < -1:
+            return -2
+        elif ret_pct < -2:
+            return -3
+        return 0
+
+    # Calculate trending score via linear regression on price
+    # Use scikit-learn LinearRegression to detect trend on last 6 weeks price
+    if len(df) < 10:
+        trend_score = 3
+    else:
+        prices = df["Close"].values.reshape(-1, 1)
+        days = np.arange(len(prices)).reshape(-1, 1)
+        model = LinearRegression()
+        model.fit(days, prices)
+        slope = model.coef_[0][0]
+
+        # Map slope to score (example thresholds, tweak as needed)
+        if slope > 0.1:
+            trend_score = 5  # Strong uptrend
+        elif 0.05 < slope <= 0.1:
+            trend_score = 4  # Moderate uptrend
+        elif -0.05 <= slope <= 0.05:
+            trend_score = 3  # Neutral
+        elif -0.1 <= slope < -0.05:
+            trend_score = 2  # Moderate downtrend
+        else:
+            trend_score = 1  # Strong downtrend
+
+    # For each day with RVOL >= 78th percentile, apply accumulation/distribution weights
+    for idx in range(1, len(df)):
+        row = df.iloc[idx]
         if row["RVOL"] >= rvol_78th:
-            # Calculate daily return in %
-            if idx == 0:
-                continue  # no previous day to calc return
-            prev_close = df.loc[idx - 1, "Close"] if (idx - 1) in df.index else None
-            if prev_close is None or prev_close == 0:
+            prev_close = df.iloc[idx - 1]["Close"]
+            if prev_close == 0:
                 continue
             ret_pct = ((row["Close"] - prev_close) / prev_close) * 100
-
-            # Scenario weights according to your rules
             if ret_pct >= 0:
-                # Accumulation scenarios
-                if 0 <= ret_pct < 1:
-                    weight = 1
-                elif 1 <= ret_pct < 2:
-                    weight = 2
-                elif ret_pct >= 2:
-                    weight = 3
-                else:
-                    weight = 0
+                weight = accumulation_weight(ret_pct)
             else:
-                # Distribution scenarios
-                if -1 <= ret_pct < 0:
-                    weight = -1
-                elif -2 <= ret_pct < -1:
-                    weight = -2
-                elif ret_pct < -2:
-                    weight = -3
-                else:
-                    weight = 0
+                weight = distribution_weight(ret_pct)
 
             total_weight += weight
             count += 1
 
     if count == 0:
-        # No significant RVOL spikes found, treat as neutral
-        return 3
+        # No significant RVOL spikes found, treat as neutral (trend only)
+        base_score = 3
+    else:
+        avg_weight = total_weight / count
+        # Normalize from [-3,3] to [0,5]
+        base_score = (avg_weight + 3) / 6 * 5
+        base_score = max(0, min(5, base_score))
 
-    # Normalize score from aggregated weights over count, scale approx 0-5
-    avg_weight = total_weight / count
+    # Combine base score and trend score (weight 70%-30%)
+    combined_score = 0.7 * base_score + 0.3 * trend_score
 
-    # Map avg_weight (which can range roughly from -3 to 3) to 0-5 scale
-    norm_score = (avg_weight + 3) / 6 * 5
-    norm_score = max(0, min(5, norm_score))
-
-    return norm_score
+    return combined_score
 
 # --- Compute Overall Health ---
 def compute_asset_health(yahoo_df, cot_df, asset_name):
