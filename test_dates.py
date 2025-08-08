@@ -62,19 +62,23 @@ def fetch_yahooquery_data(tickers, start, end):
                 dfs[t] = pd.DataFrame()
                 continue
 
-            # Defensive datetime conversion
-            if not isinstance(df_t.index, pd.DatetimeIndex):
+            # Handle possible MultiIndex in df_t:
+            if isinstance(df_t.index, pd.MultiIndex):
+                # Extract the datetime level (usually level 0 after slicing)
+                dt_index = df_t.index.get_level_values(0)
+                dt_index = pd.to_datetime(dt_index, errors='coerce')
+                df_t.index = dt_index
+            else:
                 df_t.index = pd.to_datetime(df_t.index, errors='coerce')
-                df_t = df_t[~df_t.index.isna()]  # drop rows with invalid dates
 
+            df_t = df_t[~df_t.index.isna()]  # drop invalid dates
             df_t = df_t.loc[(df_t.index >= start) & (df_t.index <= end)]
             dfs[t] = df_t
         return dfs
 
     # single ticker fallback
-    if not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.index, errors='coerce')
-        df = df[~df.index.isna()]
+    df.index = pd.to_datetime(df.index, errors='coerce')
+    df = df[~df.index.isna()]
     return {tickers[0]: df.loc[(df.index >= start) & (df.index <= end)]}
 
 # ----------------------------
@@ -299,4 +303,4 @@ if not combined_df.empty:
 if not entries_df.empty:
     if st.button('Download entries CSV'):
         csv = entries_df.to_csv().encode('utf-8')
-        st.download_button('Download Entries CSV', data=csv, file_name='entries.csv', mime='text/csv')
+        st.download_button('Download Entries CSV', data=csv, file_name='entries.csv', mime='text/csv')a
