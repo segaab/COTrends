@@ -303,4 +303,4 @@ if not combined_df.empty:
 if not entries_df.empty:
     if st.button('Download entries CSV'):
         csv = entries_df.to_csv().encode('utf-8')
-        st.download_button('Download Entries CSV', data=csv, file_name='entries.csv', mime='text/csv')a
+        st.download_button('Download Entries CSV', data=csv, file_name='entries.csv', mime='text/csv')
