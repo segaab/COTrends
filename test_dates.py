@@ -7,7 +7,7 @@ from yahooquery import Ticker
 import os
 
 # --- Config & Cache directory ---
-FRED_API_KEY = os.getenv('FRED_API_KEY', '')
+FRED_API_KEY="91bb2c5920fb8f843abdbbfdfcab5345"
 CACHE_DIR = "./data_cache"
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
