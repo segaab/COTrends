@@ -36,12 +36,49 @@ def fetch_yahoo_data(symbol, start, end):
     df = t.history(start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"))
     if df.empty:
         return pd.DataFrame()
+    
+    # Flatten MultiIndex if present
     if isinstance(df.index, pd.MultiIndex):
         df = df.reset_index()
-    df = df.sort_values("date")
-    df = df.rename(columns={"close": "Close", "volume": "Volume", "openInterest": "OpenInterest"})
+
+    # Ensure 'date' column exists or rename if possible
+    if "date" not in df.columns:
+        if "datetime" in df.columns:
+            df.rename(columns={"datetime": "date"}, inplace=True)
+        else:
+            df = df.reset_index()
+            if "date" not in df.columns:
+                raise ValueError("No date column found in Yahoo data")
+    
+    # Normalize column names (case insensitive)
+    rename_map = {}
+    for col in df.columns:
+        col_lower = col.lower()
+        if col_lower == "close":
+            rename_map[col] = "Close"
+        elif col_lower == "volume":
+            rename_map[col] = "Volume"
+        elif col_lower == "openinterest":
+            rename_map[col] = "OpenInterest"
+    df = df.rename(columns=rename_map)
+
+    # Fill missing columns with zeros if absent
+    if "OpenInterest" not in df.columns:
+        df["OpenInterest"] = 0
+    if "Volume" not in df.columns:
+        df["Volume"] = 0
+
+    # Confirm required columns exist
+    for col in ["date", "Close", "Volume", "OpenInterest"]:
+        if col not in df.columns:
+            if col == "date":
+                raise ValueError("Date column missing in Yahoo data")
+            df[col] = 0
+    
     df = df[["date", "Close", "Volume", "OpenInterest"]]
     df["date"] = pd.to_datetime(df["date"])
+
+    df = df.sort_values("date").reset_index(drop=True)
     return df
 
 @st.cache_data(ttl=3600)
