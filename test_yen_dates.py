@@ -81,8 +81,23 @@ def fetch_cot_data(market_name):
         if df.empty:
             return df
         df["report_date_as_yyyy_mm_dd"] = pd.to_datetime(df["report_date_as_yyyy_mm_dd"])
-        for col in ["noncommercial_positions_long", "noncommercial_positions_short", "commercial_positions_long", "commercial_positions_short"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+        # Convert all needed columns to numeric
+        cols_to_int = [
+            "noncomm_positions_long_all",
+            "noncomm_positions_short_all",
+            "noncomm_postions_spread_all",
+            "comm_positions_long_all",
+            "comm_positions_short_all",
+            "tot_rept_positions_long_all",
+            "tot_rept_positions_short",
+            "nonrept_positions_long_all",
+            "nonrept_positions_short_all"
+        ]
+        for col in cols_to_int:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+            else:
+                df[col] = 0
         return df.sort_values("report_date_as_yyyy_mm_dd")
     except Exception as e:
         st.warning(f"Error fetching COT data for {market_name}: {e}")
@@ -91,14 +106,14 @@ def fetch_cot_data(market_name):
 # --- Process COT Net Positions ---
 def compute_cot_net_positions(df):
     df = df.copy()
-    df["noncommercial_net"] = df["noncommercial_positions_long"] - df["noncommercial_positions_short"]
-    df["commercial_net"] = df["commercial_positions_long"] - df["commercial_positions_short"]
+    df["noncommercial_net"] = df["noncomm_positions_long_all"] - df["noncomm_positions_short_all"]
+    df["commercial_net"] = df["comm_positions_long_all"] - df["comm_positions_short_all"]
     return df
 
 # --- Short Term COT Score ---
 def cot_short_term_score(df):
     if df.empty or len(df) < 2:
-        return 3  # Neutral fallback
+        return 3
     latest = df.iloc[-1]
     prev = df.iloc[-2]
     nc_change = latest["noncommercial_net"] - prev["noncommercial_net"]  # bullish if positive
@@ -128,16 +143,15 @@ def cot_short_term_score(df):
                 return 5
     nc_score = scale_net_change(nc_change, bullish=True)
     c_score = scale_net_change(c_change, bullish=False)
-    combined = (nc_score + c_score) / 2
-    return combined
+    return (nc_score + c_score) / 2
 
 # --- Long Term COT Score ---
 def cot_long_term_score(df):
     if df.empty or len(df) < COT_LONG_TERM_WEEKS:
-        return 3  # Neutral fallback
+        return 3
     df = df.copy()
-    df["noncommercial_net"] = df["noncommercial_positions_long"] - df["noncommercial_positions_short"]
-    df["commercial_net"] = df["commercial_positions_long"] - df["commercial_positions_short"]
+    df["noncommercial_net"] = df["noncomm_positions_long_all"] - df["noncomm_positions_short_all"]
+    df["commercial_net"] = df["comm_positions_long_all"] - df["comm_positions_short_all"]
     df["nc_rolling_avg"] = df["noncommercial_net"].rolling(window=COT_LONG_TERM_WEEKS).mean()
     df["c_rolling_avg"] = df["commercial_net"].rolling(window=COT_LONG_TERM_WEEKS).mean()
     latest = df.iloc[-1]
@@ -168,8 +182,7 @@ def cot_long_term_score(df):
                 return 5
     nc_score = score_long_term_change(latest["nc_rolling_avg"], past["nc_rolling_avg"], bullish=True)
     c_score = score_long_term_change(latest["c_rolling_avg"], past["c_rolling_avg"], bullish=False)
-    combined = (nc_score + c_score) / 2
-    return combined
+    return (nc_score + c_score) / 2
 
 # --- Open Interest Score ---
 def open_interest_score(df):
@@ -195,7 +208,7 @@ def open_interest_score(df):
 # --- Price, Volume and Relative Volume Score ---
 def price_volume_rvol_score(df):
     if df.empty or len(df) < ARV_LOOKBACK_DAYS + 3:
-        return 3  # Neutral fallback
+        return 3
     df = df.sort_values("date").copy()
     df["PctChange"] = df["Close"].pct_change() * 100
     df["AvgVol20"] = df["Volume"].rolling(ARV_LOOKBACK_DAYS).mean()
@@ -270,57 +283,45 @@ if start_date >= end_date:
     st.error("Start Date must be before End Date.")
     st.stop()
 
-if "rerun_counter" not in st.session_state:
-    st.session_state.rerun_counter = 0
+if st.button("Reload Data"):
+    st.cache_data.clear()
 
-if st.button("Refresh All Data"):
-    st.session_state.rerun_counter += 1
-    st.experimental_rerun()
+results = []
+for market in COT_MARKETS:
+    st.write(f"Fetching data for {market} ...")
+    yahoo_symbol = "GC=F" if "GOLD" in market else "SI=F"
+    try:
+        yahoo_df = fetch_yahoo_data(yahoo_symbol, start_date, end_date)
+        cot_df_raw = fetch_cot_data(market)
+        if cot_df_raw.empty:
+            st.warning(f"No COT data available for {market}")
+            continue
+        cot_df = compute_cot_net_positions(cot_df_raw)
+        health, pv_score, cot_score, oi_score = compute_asset_health(yahoo_df, cot_df, market)
+        results.append(
+            {
+                "Market": market,
+                "Health": health,
+                "Health Color": health_color(health),
+                "Price/Volume Score": pv_score,
+                "COT Score": cot_score,
+                "Open Interest Score": oi_score,
+            }
+        )
+    except Exception as e:
+        st.error(f"Error processing {market}: {e}")
 
-gold_yahoo = fetch_yahoo_data("GC=F", start_date, end_date)
-silver_yahoo = fetch_yahoo_data("SI=F", start_date, end_date)
+if results:
+    df_results = pd.DataFrame(results)
+    st.dataframe(df_results)
 
-gold_cot_raw = fetch_cot_data(COT_MARKETS[0])
-silver_cot_raw = fetch_cot_data(COT_MARKETS[1])
-
-gold_cot = compute_cot_net_positions(gold_cot_raw)
-silver_cot = compute_cot_net_positions(silver_cot_raw)
-
-gold_health, gold_pv, gold_cot_score, gold_oi = compute_asset_health(gold_yahoo, gold_cot, "Gold")
-silver_health, silver_pv, silver_cot_score, silver_oi = compute_asset_health(silver_yahoo, silver_cot, "Silver")
-
-st.header("Health Gauge Results")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    st.subheader("Gold")
-    st.metric("Overall Health Score", gold_health, delta=None)
-    st.markdown(f"**Color:** {health_color(gold_health)}")
-    st.write(f"Price/Volume/RVol Score: {gold_pv:.2f}")
-    st.write(f"COT Score: {gold_cot_score:.2f}")
-    st.write(f"Open Interest Score: {gold_oi:.2f}")
-
-with col2:
-    st.subheader("Silver")
-    st.metric("Overall Health Score", silver_health, delta=None)
-    st.markdown(f"**Color:** {health_color(silver_health)}")
-    st.write(f"Price/Volume/RVol Score: {silver_pv:.2f}")
-    st.write(f"COT Score: {silver_cot_score:.2f}")
-    st.write(f"Open Interest Score: {silver_oi:.2f}")
-
-st.markdown("---")
-
-st.info(
-    """
-    **Legend:**  
-    0: 🔴 Red (Strong Bearish)  
-    1: 🟠 Orange-Red (Moderate Bearish)  
-    2: 🟠 Orange (Slight Bearish)  
-    3: 🟡 Yellow (Neutral)  
-    4: 🟢 Light Green (Moderate Bullish)  
-    5: 🟢 Green (Strong Bullish)  
-    """
-)
-
-# End of script
+    # Show a gauge bar for each asset
+    for r in results:
+        st.markdown(f"### {r['Market']}")
+        st.progress(min(max(r["Health"] / 5, 0), 1))
+        st.write(f"**Health Score:** {r['Health']} ({r['Health Color']})")
+        st.write(f"Price/Volume Score: {r['Price/Volume Score']:.2f}")
+        st.write(f"COT Score: {r['COT Score']:.2f}")
+        st.write(f"Open Interest Score: {r['Open Interest Score']:.2f}")
+else:
+    st.info("No results to display yet. Adjust date range or reload data.")
