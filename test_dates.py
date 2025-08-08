@@ -1,9 +1,10 @@
 """
 Streamlit dashboard using yahooquery for Fed Funds futures (ZQ=F),
-FRED API for SOFR and FEDFUNDS, yfinance for gold/silver.
+Gold (GC=F), Silver (SI=F),
+FRED API for SOFR and FEDFUNDS.
 
 - Date range: yesterday 23:00 ET minus 365 days to yesterday 23:00 ET
-- Combined Rate = average(FedFunds Futures implied rate, SOFR 30-day rolling avg)
+- Combined Rate = average(Fed Funds Futures implied rate, SOFR 30-day rolling avg)
 - Entries: combined_rate < 25th percentile
 - Display 2-week forward gold & silver prices from entry dates with navigation
 """
@@ -19,7 +20,7 @@ import os
 # ----------------------------
 # Config / API Keys
 # ----------------------------
-FRED_API_KEY="91bb2c5920fb8f843abdbbfdfcab5345"
+FRED_API_KEY = os.environ.get('FRED_API_KEY', '')  # set in your env variables
 CACHE_DIR = "./data_cache"
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
@@ -38,24 +39,32 @@ start_date = yesterday_23 - dt.timedelta(days=365)
 end_date = yesterday_23
 
 # ----------------------------
-# Fetch Fed Funds Futures data using yahooquery
+# Fetch historical data from yahooquery for multiple tickers
 # ----------------------------
-def fetch_zq_yahooquery(start, end):
+@st.cache_data(ttl=3600)
+def fetch_yahooquery_data(tickers, start, end):
     """
-    Fetch Fed Funds Futures (ZQ=F) daily historical data using yahooquery.
-    Calculate implied rate = 100 - close price.
+    Fetch historical daily data for multiple tickers using yahooquery.
+    Returns dict of DataFrames indexed by ticker.
     """
-    ticker = Ticker("ZQ=F")
-    df = ticker.history(start=start.strftime('%Y-%m-%d'), end=(end + dt.timedelta(days=1)).strftime('%Y-%m-%d'), interval='1d')
+    ticker_obj = Ticker(tickers)
+    df = ticker_obj.history(start=start.strftime('%Y-%m-%d'), end=(end + dt.timedelta(days=1)).strftime('%Y-%m-%d'), interval='1d')
     # yahooquery returns MultiIndex DataFrame with level 0 = ticker, level 1 = datetime
     if df.empty:
-        return pd.DataFrame()
+        return {t: pd.DataFrame() for t in tickers}
     if isinstance(df.index, pd.MultiIndex):
-        df = df.reset_index(level=0, drop=True)
-    df.index = pd.to_datetime(df.index)
-    df = df.loc[(df.index >= start) & (df.index <= end)]
-    df['implied_rate'] = 100.0 - df['close']
-    return df[['open', 'high', 'low', 'close', 'volume', 'implied_rate']]
+        df = df.reset_index(level=0, drop=False)
+    else:
+        # unexpected format, wrap into dict
+        return {t: df for t in tickers}
+
+    dfs = {}
+    for t in tickers:
+        df_t = df[df['symbol'] == t].copy()
+        df_t.index = pd.to_datetime(df_t['date'])
+        df_t = df_t.loc[(df_t.index >= start) & (df_t.index <= end)]
+        dfs[t] = df_t
+    return dfs
 
 # ----------------------------
 # Fetch FRED series helper (with caching)
@@ -85,25 +94,14 @@ def fetch_fred_series(series_id, start=None, end=None, fred_client=None):
     return s
 
 # ----------------------------
-# Fetch Gold & Silver via yfinance
-# ----------------------------
-@st.cache_data(ttl=3600)
-def fetch_metals(start, end):
-    tickers = ["GC=F", "SI=F"]
-    data = yf.download(tickers, start=start, end=end, progress=False, group_by='ticker')
-    gold = data['GC=F']['Adj Close'].rename('gold') if ('GC=F' in data and 'Adj Close' in data['GC=F']) else pd.Series(dtype=float)
-    silver = data['SI=F']['Adj Close'].rename('silver') if ('SI=F' in data and 'Adj Close' in data['SI=F']) else pd.Series(dtype=float)
-    df = pd.concat([gold, silver], axis=1)
-    return df
-
-# ----------------------------
 # Compute combined rates
 # ----------------------------
 def compute_combined_rates(zq_df, sofr_series, window_days=30):
-    zq_daily = zq_df['implied_rate'].resample('D').last().dropna()
+    zq_daily = zq_df['close'].resample('D').last().dropna()
+    implied_rate = 100.0 - zq_daily
     sofr = sofr_series.copy()
     sofr = sofr.resample('D').ffill()
-    df = pd.DataFrame({'implied_rate': zq_daily}).join(sofr.rename('sofr'), how='inner')
+    df = pd.DataFrame({'implied_rate': implied_rate}).join(sofr.rename('sofr'), how='inner')
     df['sofr_avg'] = df['sofr'].rolling(window=window_days, min_periods=1).mean()
     df['combined_rate'] = (df['implied_rate'] + df['sofr_avg']) / 2.0
     return df.dropna()
@@ -111,7 +109,7 @@ def compute_combined_rates(zq_df, sofr_series, window_days=30):
 # ----------------------------
 # Entries and returns
 # ----------------------------
-def compute_entries_and_returns(combined_df, metals_df, holding_days=14):
+def compute_entries_and_returns(combined_df, gold_df, silver_df, holding_days=14):
     q25 = combined_df['combined_rate'].quantile(0.25)
     entries = combined_df[combined_df['combined_rate'] < q25].copy()
     entries['entry_date'] = entries.index
@@ -120,14 +118,17 @@ def compute_entries_and_returns(combined_df, metals_df, holding_days=14):
     for dt_entry in entries['entry_date']:
         buy_date = dt_entry
         sell_date = buy_date + pd.Timedelta(days=holding_days)
-        slice_metals = metals_df.loc[buy_date:sell_date]
-        if slice_metals.empty:
+
+        slice_gold = gold_df.loc[buy_date:sell_date]
+        slice_silver = silver_df.loc[buy_date:sell_date]
+
+        if slice_gold.empty or slice_silver.empty:
             continue
         try:
-            entry_gold = slice_metals['gold'].iloc[0]
-            entry_silver = slice_metals['silver'].iloc[0]
-            exit_gold = slice_metals['gold'].iloc[-1]
-            exit_silver = slice_metals['silver'].iloc[-1]
+            entry_gold = slice_gold['close'].iloc[0]
+            exit_gold = slice_gold['close'].iloc[-1]
+            entry_silver = slice_silver['close'].iloc[0]
+            exit_silver = slice_silver['close'].iloc[-1]
         except Exception:
             continue
         ret_gold = (exit_gold / entry_gold) - 1.0
@@ -161,8 +162,8 @@ def compute_entries_and_returns(combined_df, metals_df, holding_days=14):
 # ----------------------------
 # Streamlit UI
 # ----------------------------
-st.set_page_config(page_title="Fed Funds ZQ Dashboard", layout='wide')
-st.title("Fed Funds Futures (ZQ) + SOFR + Metals Dashboard")
+st.set_page_config(page_title="Fed Funds ZQ + Metals Dashboard", layout='wide')
+st.title("Fed Funds Futures (ZQ=F) + SOFR + Gold & Silver Dashboard")
 
 with st.sidebar:
     st.header('Data & Parameters')
@@ -183,17 +184,41 @@ except Exception as e:
     fred_client = None
 
 zq_cache_path = f"{CACHE_DIR}/zq_yq_history_{start_date.date()}_{end_date.date()}.csv"
-use_cache = os.path.exists(zq_cache_path) and not refresh
+gold_cache_path = f"{CACHE_DIR}/gold_yq_history_{start_date.date()}_{end_date.date()}.csv"
+silver_cache_path = f"{CACHE_DIR}/silver_yq_history_{start_date.date()}_{end_date.date()}.csv"
+
+use_cache = (
+    os.path.exists(zq_cache_path) and
+    os.path.exists(gold_cache_path) and
+    os.path.exists(silver_cache_path) and
+    not refresh
+)
+
 if use_cache:
-    zq_df = pd.read_csv(zq_cache_path, parse_dates=['datetime'], index_col='datetime')
+    zq_df = pd.read_csv(zq_cache_path, parse_dates=['date']).set_index('date')
+    gold_df = pd.read_csv(gold_cache_path, parse_dates=['date']).set_index('date')
+    silver_df = pd.read_csv(silver_cache_path, parse_dates=['date']).set_index('date')
 else:
-    zq_df = fetch_zq_yahooquery(start_date, end_date)
+    dfs = fetch_yahooquery_data(['ZQ=F', 'GC=F', 'SI=F'], start_date, end_date + dt.timedelta(days=30))
+    zq_df = dfs.get('ZQ=F', pd.DataFrame())
+    gold_df = dfs.get('GC=F', pd.DataFrame())
+    silver_df = dfs.get('SI=F', pd.DataFrame())
+
     zq_df.to_csv(zq_cache_path)
+    gold_df.to_csv(gold_cache_path)
+    silver_df.to_csv(silver_cache_path)
 
-sofr_series = fetch_fred_series('SOFR', start=start_date, end=end_date, fred_client=fred_client)
-fedfunds_series = fetch_fred_series('FEDFUNDS', start=start_date, end=end_date, fred_client=fred_client)
-
-metals_df = fetch_metals(start=start_date, end=end_date + dt.timedelta(days=30))  # extra for forward returns
+if fred_client:
+    try:
+        sofr_series = fetch_fred_series('SOFR', start=start_date, end=end_date, fred_client=fred_client)
+        fedfunds_series = fetch_fred_series('FEDFUNDS', start=start_date, end=end_date, fred_client=fred_client)
+    except Exception as e:
+        st.error(f"Error fetching data from FRED: {e}")
+        sofr_series = pd.Series(dtype=float)
+        fedfunds_series = pd.Series(dtype=float)
+else:
+    sofr_series = pd.Series(dtype=float)
+    fedfunds_series = pd.Series(dtype=float)
 
 combined_df = compute_combined_rates(zq_df, sofr_series, window_days=sofr_window)
 
@@ -201,7 +226,7 @@ st.subheader('Combined Rate Overview')
 st.write('Combined Rate is (ZQ implied rate + SOFR rolling average) / 2')
 st.line_chart(combined_df[['implied_rate', 'sofr_avg', 'combined_rate']])
 
-entries_df, summary = compute_entries_and_returns(combined_df, metals_df, holding_days=holding_days)
+entries_df, summary = compute_entries_and_returns(combined_df, gold_df, silver_df, holding_days=holding_days)
 
 st.subheader('Entry Points (Combined Rate < 25th percentile)')
 st.write(f"Number of entries: {summary['n_entries']}")
@@ -236,10 +261,14 @@ else:
 
     buy = sel_date
     sell = buy + pd.Timedelta(days=holding_days)
-    slice_metals = metals_df.loc[buy:sell]
+
+    slice_gold = gold_df.loc[buy:sell]
+    slice_silver = silver_df.loc[buy:sell]
 
     st.write(f"Showing gold & silver from {buy.date()} to {sell.date()}")
-    st.line_chart(slice_metals)
+
+    st.line_chart(slice_gold['close'])
+    st.line_chart(slice_silver['close'])
 
     row = entries_df.loc[sel_date]
     st.write('Return summary for this entry:')
@@ -249,7 +278,7 @@ else:
     }))
 
 st.markdown('---')
-st.caption('This dashboard uses yahooquery for ZQ=F and FRED for SOFR/FEDFUNDS. Use for prototyping; for production get licensed real-time feeds.')
+st.caption('This dashboard uses yahooquery for prices and FRED for SOFR/FEDFUNDS. For production, consider licensed real-time feeds.')
 
 if not combined_df.empty:
     if st.button('Download combined rates CSV'):
