@@ -6,17 +6,13 @@ from fredapi import Fred
 from yahooquery import Ticker
 import os
 
-# ----------------------------
-# Config / API Keys
-# ----------------------------
-FRED_API_KEY = os.environ.get('FRED_API_KEY', '')  # set in your env variables
+# --- Config & Cache directory ---
+FRED_API_KEY = os.getenv('FRED_API_KEY', '')
 CACHE_DIR = "./data_cache"
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 
-# ----------------------------
-# Fixed date range: yesterday 23:00 ET minus 365 days
-# ----------------------------
+# --- Date Range Setup ---
 now_utc = dt.datetime.utcnow()
 et_offset = dt.timedelta(hours=4)  # approximate ET offset from UTC
 now_et = now_utc - et_offset
@@ -27,17 +23,15 @@ yesterday_23 = yesterday_et.replace(hour=23, minute=0, second=0, microsecond=0)
 start_date = yesterday_23 - dt.timedelta(days=365)
 end_date = yesterday_23
 
-# ----------------------------
-# Fetch historical data from yahooquery for multiple tickers
-# ----------------------------
+# --- Fetch yahooquery data ---
 @st.cache_data(ttl=3600)
 def fetch_yahooquery_data(tickers, start, end):
-    """
-    Fetch historical daily data for multiple tickers using yahooquery.
-    Returns dict of DataFrames indexed by ticker.
-    """
     ticker_obj = Ticker(tickers)
-    df = ticker_obj.history(start=start.strftime('%Y-%m-%d'), end=(end + dt.timedelta(days=1)).strftime('%Y-%m-%d'), interval='1d')
+    df = ticker_obj.history(
+        start=start.strftime('%Y-%m-%d'),
+        end=(end + dt.timedelta(days=1)).strftime('%Y-%m-%d'),
+        interval='1d'
+    )
 
     if df.empty:
         return {t: pd.DataFrame() for t in tickers}
@@ -51,17 +45,19 @@ def fetch_yahooquery_data(tickers, start, end):
                 dfs[t] = pd.DataFrame()
                 continue
 
-            # Try to parse index as datetime, drop invalids safely
             try:
                 if not pd.api.types.is_datetime64_any_dtype(df_t.index):
                     dt_index = pd.to_datetime(df_t.index, errors='coerce')
-                    df_t = df_t.assign(_dt_index=dt_index)
-                    df_t = df_t.dropna(subset=['_dt_index'])
-                    df_t.index = df_t['_dt_index']
-                    df_t = df_t.drop(columns=['_dt_index'])
                 else:
-                    df_t.index = pd.to_datetime(df_t.index, errors='coerce')
-                    df_t = df_t[~df_t.index.isna()]
+                    dt_index = df_t.index
+
+                if dt_index.tz is not None:
+                    dt_index = dt_index.tz_localize(None)
+
+                df_t = df_t.assign(_dt_index=dt_index)
+                df_t = df_t.dropna(subset=['_dt_index'])
+                df_t.index = df_t['_dt_index']
+                df_t = df_t.drop(columns=['_dt_index'])
             except Exception as e:
                 st.warning(f"Date parsing issue for ticker {t}: {e}")
                 dfs[t] = pd.DataFrame()
@@ -70,14 +66,20 @@ def fetch_yahooquery_data(tickers, start, end):
             df_t = df_t.loc[(df_t.index >= start) & (df_t.index <= end)]
             dfs[t] = df_t
     else:
-        # single ticker fallback
         try:
             if not pd.api.types.is_datetime64_any_dtype(df.index):
-                df.index = pd.to_datetime(df.index, errors='coerce')
-                df = df[~df.index.isna()]
+                dt_index = pd.to_datetime(df.index, errors='coerce')
             else:
-                df.index = pd.to_datetime(df.index, errors='coerce')
-                df = df[~df.index.isna()]
+                dt_index = df.index
+
+            if dt_index.tz is not None:
+                dt_index = dt_index.tz_localize(None)
+
+            df = df.assign(_dt_index=dt_index)
+            df = df.dropna(subset=['_dt_index'])
+            df.index = df['_dt_index']
+            df = df.drop(columns=['_dt_index'])
+
             df = df.loc[(df.index >= start) & (df.index <= end)]
         except Exception as e:
             st.warning(f"Date parsing issue for single ticker: {e}")
@@ -86,9 +88,7 @@ def fetch_yahooquery_data(tickers, start, end):
 
     return dfs
 
-# ----------------------------
-# Fetch FRED series helper (with caching)
-# ----------------------------
+# --- Fetch FRED series with caching ---
 def fetch_fred_series(series_id, start=None, end=None, fred_client=None):
     fred_client = fred_client or Fred(api_key=FRED_API_KEY)
     cache_path = f"{CACHE_DIR}/{series_id}.csv"
@@ -113,23 +113,26 @@ def fetch_fred_series(series_id, start=None, end=None, fred_client=None):
         s = s[s.index <= pd.to_datetime(end)]
     return s
 
-# ----------------------------
-# Compute combined rates
-# ----------------------------
+# --- Combine Fed Funds futures implied rate and SOFR rolling average ---
 def compute_combined_rates(zq_df, sofr_series, window_days=30):
+    if 'close' not in zq_df.columns:
+        st.error("ZQ=F data missing 'close' column.")
+        return pd.DataFrame()
     zq_daily = zq_df['close'].resample('D').last().dropna()
     implied_rate = 100.0 - zq_daily
+
     sofr = sofr_series.copy()
     sofr = sofr.resample('D').ffill()
+
     df = pd.DataFrame({'implied_rate': implied_rate}).join(sofr.rename('sofr'), how='inner')
     df['sofr_avg'] = df['sofr'].rolling(window=window_days, min_periods=1).mean()
     df['combined_rate'] = (df['implied_rate'] + df['sofr_avg']) / 2.0
     return df.dropna()
 
-# ----------------------------
-# Entries and returns
-# ----------------------------
+# --- Compute entry points and returns ---
 def compute_entries_and_returns(combined_df, gold_df, silver_df, holding_days=14):
+    if combined_df.empty:
+        return pd.DataFrame(), {}
     q25 = combined_df['combined_rate'].quantile(0.25)
     entries = combined_df[combined_df['combined_rate'] < q25].copy()
     entries['entry_date'] = entries.index
@@ -179,9 +182,7 @@ def compute_entries_and_returns(combined_df, gold_df, silver_df, holding_days=14
 
     return results_df, summary
 
-# ----------------------------
-# Streamlit UI
-# ----------------------------
+# --- Streamlit UI ---
 st.set_page_config(page_title="Fed Funds ZQ + Metals Dashboard", layout='wide')
 st.title("Fed Funds Futures (ZQ=F) + SOFR + Gold & Silver Dashboard")
 
@@ -189,7 +190,7 @@ with st.sidebar:
     st.header('Data & Parameters')
     fred_key_input = st.text_input('FRED API Key (or set FRED_API_KEY env var)', value=FRED_API_KEY)
     if fred_key_input:
-        FRED_API_KEY = fred_key_input
+        FRED_API_KEY = fred_key_input.strip()
     sofr_window = st.number_input('SOFR rolling window (days)', min_value=1, max_value=90, value=30)
     holding_days = st.number_input('Holding days after entry', min_value=1, max_value=60, value=14)
     refresh = st.button('Refresh Data')
@@ -197,11 +198,15 @@ with st.sidebar:
 st.markdown(f"### Data Range: {start_date.date()} to {end_date.date()}")
 st.markdown('**Fetching data — this may take a few seconds (uses yahooquery & FRED)**')
 
+if not FRED_API_KEY or len(FRED_API_KEY) != 32:
+    st.error("Please provide a valid 32-character FRED API Key!")
+    st.stop()
+
 try:
     fred_client = Fred(api_key=FRED_API_KEY)
 except Exception as e:
     st.error(f'FRED client init error: {e}')
-    fred_client = None
+    st.stop()
 
 zq_cache_path = f"{CACHE_DIR}/zq_yq_history_{start_date.date()}_{end_date.date()}.csv"
 gold_cache_path = f"{CACHE_DIR}/gold_yq_history_{start_date.date()}_{end_date.date()}.csv"
@@ -228,22 +233,25 @@ else:
     gold_df.to_csv(gold_cache_path)
     silver_df.to_csv(silver_cache_path)
 
-if fred_client:
-    try:
-        sofr_series = fetch_fred_series('SOFR', start=start_date, end=end_date, fred_client=fred_client)
-        fedfunds_series = fetch_fred_series('FEDFUNDS', start=start_date, end=end_date, fred_client=fred_client)
-    except Exception as e:
-        st.error(f"Error fetching data from FRED: {e}")
-        sofr_series = pd.Series(dtype=float)
-        fedfunds_series = pd.Series(dtype=float)
-else:
+# Debug columns
+st.write("ZQ=F columns:", list(zq_df.columns))
+st.write("Gold (GC=F) columns:", list(gold_df.columns))
+st.write("Silver (SI=F) columns:", list(silver_df.columns))
+
+try:
+    sofr_series = fetch_fred_series('SOFR', start=start_date, end=end_date, fred_client=fred_client)
+except Exception as e:
+    st.error(f"Error fetching SOFR from FRED: {e}")
     sofr_series = pd.Series(dtype=float)
-    fedfunds_series = pd.Series(dtype=float)
 
 combined_df = compute_combined_rates(zq_df, sofr_series, window_days=sofr_window)
 
+if combined_df.empty:
+    st.error("Combined rate data is empty. Check your data sources.")
+    st.stop()
+
 st.subheader('Combined Rate Overview')
-st.write('Combined Rate is (ZQ implied rate + SOFR rolling average) / 2')
+st.write('Combined Rate is average of ZQ implied rate and SOFR rolling average')
 st.line_chart(combined_df[['implied_rate', 'sofr_avg', 'combined_rate']])
 
 entries_df, summary = compute_entries_and_returns(combined_df, gold_df, silver_df, holding_days=holding_days)
@@ -285,25 +293,14 @@ else:
     slice_gold = gold_df.loc[buy:sell]
     slice_silver = silver_df.loc[buy:sell]
 
-    st.write(f"Showing gold & silver from {buy.date()} to {sell.date()}")
+    st.subheader(f"Gold and Silver Prices from {buy.date()} to {sell.date()}")
 
-    st.line_chart(slice_gold['close'])
-    st.line_chart(slice_silver['close'])
+    if slice_gold.empty or slice_silver.empty:
+        st.warning("No price data available for gold or silver in this date range.")
+    else:
+        st.line_chart(slice_gold['close'], use_container_width=True)
+        st.line_chart(slice_silver['close'], use_container_width=True)
 
-    row = entries_df.loc[sel_date]
-    st.write('Return summary for this entry:')
-    st.write(pd.DataFrame({
-        'metric': ['entry_gold', 'exit_gold', 'ret_gold', 'entry_silver', 'exit_silver', 'ret_silver'],
-        'value': [row['entry_gold'], row['exit_gold'], row['ret_gold'], row['entry_silver'], row['exit_silver'], row['ret_silver']]
-    }))
-
-st.markdown('---')
-st.caption('This dashboard uses yahooquery for prices and FRED for SOFR/FEDFUNDS. For production, consider licensed real-time feeds.')
-
-if not combined_df.empty:
-    csv = combined_df.to_csv().encode('utf-8')
-    st.download_button('Download Combined CSV', data=csv, file_name='combined_rates.csv', mime='text/csv')
-
-if not entries_df.empty:
+    # Show CSV download for entries summary
     csv = entries_df.to_csv().encode('utf-8')
     st.download_button('Download Entries CSV', data=csv, file_name='entries.csv', mime='text/csv')
