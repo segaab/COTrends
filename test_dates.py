@@ -19,7 +19,7 @@ import os
 # ----------------------------
 # Config / API Keys
 # ----------------------------
-FRED_API_KEY = os.environ.get('FRED_API_KEY', '')  # set in your env variables
+FRED_API_KEY="91bb2c5920fb8f843abdbbfdfcab5345"
 CACHE_DIR = "./data_cache"
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
