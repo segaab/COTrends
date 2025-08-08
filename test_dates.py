@@ -1,14 +1,3 @@
-"""
-Streamlit dashboard using yahooquery for Fed Funds futures (ZQ=F),
-Gold (GC=F), Silver (SI=F),
-FRED API for SOFR and FEDFUNDS.
-
-- Date range: yesterday 23:00 ET minus 365 days to yesterday 23:00 ET
-- Combined Rate = average(Fed Funds Futures implied rate, SOFR 30-day rolling avg)
-- Entries: combined_rate < 25th percentile
-- Display 2-week forward gold & silver prices from entry dates with navigation
-"""
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -53,8 +42,8 @@ def fetch_yahooquery_data(tickers, start, end):
     if df.empty:
         return {t: pd.DataFrame() for t in tickers}
 
+    dfs = {}
     if isinstance(df.index, pd.MultiIndex):
-        dfs = {}
         for t in tickers:
             try:
                 df_t = df.loc[t].copy()
@@ -62,24 +51,40 @@ def fetch_yahooquery_data(tickers, start, end):
                 dfs[t] = pd.DataFrame()
                 continue
 
-            # Handle possible MultiIndex in df_t:
-            if isinstance(df_t.index, pd.MultiIndex):
-                # Extract the datetime level (usually level 0 after slicing)
-                dt_index = df_t.index.get_level_values(0)
-                dt_index = pd.to_datetime(dt_index, errors='coerce')
-                df_t.index = dt_index
-            else:
-                df_t.index = pd.to_datetime(df_t.index, errors='coerce')
+            # Try to parse index as datetime, drop invalids safely
+            try:
+                if not pd.api.types.is_datetime64_any_dtype(df_t.index):
+                    dt_index = pd.to_datetime(df_t.index, errors='coerce')
+                    df_t = df_t.assign(_dt_index=dt_index)
+                    df_t = df_t.dropna(subset=['_dt_index'])
+                    df_t.index = df_t['_dt_index']
+                    df_t = df_t.drop(columns=['_dt_index'])
+                else:
+                    df_t.index = pd.to_datetime(df_t.index, errors='coerce')
+                    df_t = df_t[~df_t.index.isna()]
+            except Exception as e:
+                st.warning(f"Date parsing issue for ticker {t}: {e}")
+                dfs[t] = pd.DataFrame()
+                continue
 
-            df_t = df_t[~df_t.index.isna()]  # drop invalid dates
             df_t = df_t.loc[(df_t.index >= start) & (df_t.index <= end)]
             dfs[t] = df_t
-        return dfs
+    else:
+        # single ticker fallback
+        try:
+            if not pd.api.types.is_datetime64_any_dtype(df.index):
+                df.index = pd.to_datetime(df.index, errors='coerce')
+                df = df[~df.index.isna()]
+            else:
+                df.index = pd.to_datetime(df.index, errors='coerce')
+                df = df[~df.index.isna()]
+            df = df.loc[(df.index >= start) & (df.index <= end)]
+        except Exception as e:
+            st.warning(f"Date parsing issue for single ticker: {e}")
+            df = pd.DataFrame()
+        dfs[tickers[0]] = df
 
-    # single ticker fallback
-    df.index = pd.to_datetime(df.index, errors='coerce')
-    df = df[~df.index.isna()]
-    return {tickers[0]: df.loc[(df.index >= start) & (df.index <= end)]}
+    return dfs
 
 # ----------------------------
 # Fetch FRED series helper (with caching)
@@ -296,11 +301,9 @@ st.markdown('---')
 st.caption('This dashboard uses yahooquery for prices and FRED for SOFR/FEDFUNDS. For production, consider licensed real-time feeds.')
 
 if not combined_df.empty:
-    if st.button('Download combined rates CSV'):
-        csv = combined_df.to_csv().encode('utf-8')
-        st.download_button('Download Combined CSV', data=csv, file_name='combined_rates.csv', mime='text/csv')
+    csv = combined_df.to_csv().encode('utf-8')
+    st.download_button('Download Combined CSV', data=csv, file_name='combined_rates.csv', mime='text/csv')
 
 if not entries_df.empty:
-    if st.button('Download entries CSV'):
-        csv = entries_df.to_csv().encode('utf-8')
-        st.download_button('Download Entries CSV', data=csv, file_name='entries.csv', mime='text/csv')
+    csv = entries_df.to_csv().encode('utf-8')
+    st.download_button('Download Entries CSV', data=csv, file_name='entries.csv', mime='text/csv')
