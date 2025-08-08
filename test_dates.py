@@ -13,7 +13,6 @@ import pandas as pd
 import numpy as np
 import datetime as dt
 from fredapi import Fred
-import yfinance as yf
 from yahooquery import Ticker
 import os
 
