@@ -53,7 +53,6 @@ def fetch_yahooquery_data(tickers, start, end):
     if df.empty:
         return {t: pd.DataFrame() for t in tickers}
 
-    # If MultiIndex, level 0 = ticker, level 1 = datetime
     if isinstance(df.index, pd.MultiIndex):
         dfs = {}
         for t in tickers:
@@ -62,13 +61,20 @@ def fetch_yahooquery_data(tickers, start, end):
             except KeyError:
                 dfs[t] = pd.DataFrame()
                 continue
-            df_t.index = pd.to_datetime(df_t.index)
+
+            # Defensive datetime conversion
+            if not isinstance(df_t.index, pd.DatetimeIndex):
+                df_t.index = pd.to_datetime(df_t.index, errors='coerce')
+                df_t = df_t[~df_t.index.isna()]  # drop rows with invalid dates
+
             df_t = df_t.loc[(df_t.index >= start) & (df_t.index <= end)]
             dfs[t] = df_t
         return dfs
 
-    # Single ticker or no MultiIndex (unlikely for multiple tickers)
-    df.index = pd.to_datetime(df.index)
+    # single ticker fallback
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, errors='coerce')
+        df = df[~df.index.isna()]
     return {tickers[0]: df.loc[(df.index >= start) & (df.index <= end)]}
 
 # ----------------------------
