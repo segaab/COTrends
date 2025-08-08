@@ -4,6 +4,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from yahooquery import Ticker
 from sodapy import Socrata
+from sklearn.linear_model import LinearRegression
 import os
 
 st.set_page_config(page_title="Gold & Silver Health Gauge", layout="wide")
@@ -14,6 +15,11 @@ COT_MARKETS = [
     "SILVER - COMMODITY EXCHANGE INC."
 ]
 
+YAHOO_SYMBOLS = {
+    "GOLD - COMMODITY EXCHANGE INC.": "GC=F",
+    "SILVER - COMMODITY EXCHANGE INC.": "SI=F"
+}
+
 WEIGHT_PV_RVOL = 0.40
 WEIGHT_COT = 0.35
 WEIGHT_OI = 0.25
@@ -21,8 +27,9 @@ WEIGHT_OI = 0.25
 COT_SHORT_TERM_WT = 0.40
 COT_LONG_TERM_WT = 0.60
 
-ARV_LOOKBACK_DAYS = 20
 COT_LONG_TERM_WEEKS = 12
+
+LOOKBACK_DAYS_SPECTRUM = 30  # Last ~6 weeks for spectrum score
 
 # --- Fetch Yahoo Data ---
 @st.cache_data(ttl=3600)
@@ -76,12 +83,11 @@ def fetch_cot_data(market_name):
     one_year_ago = today - timedelta(days=365)
     where_clause = f"market_and_exchange_names = '{market_name}' AND report_date_as_yyyy_mm_dd >= '{one_year_ago.strftime('%Y-%m-%d')}'"
     try:
-        results = client.get("6dca-aqww", where=where_clause, limit=5000, order="report_date_as_yyyy_mm_dd DESC")
+        results = client.get("6dca-aqww", where=where_clause, limit=5000, order="report_date_as_yyyy_mm_dd ASC")
         df = pd.DataFrame.from_records(results)
         if df.empty:
             return df
         df["report_date_as_yyyy_mm_dd"] = pd.to_datetime(df["report_date_as_yyyy_mm_dd"])
-        # Convert all needed columns to numeric
         cols_to_int = [
             "noncomm_positions_long_all",
             "noncomm_positions_short_all",
@@ -98,7 +104,7 @@ def fetch_cot_data(market_name):
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
             else:
                 df[col] = 0
-        return df.sort_values("report_date_as_yyyy_mm_dd")
+        return df.sort_values("report_date_as_yyyy_mm_dd").reset_index(drop=True)
     except Exception as e:
         st.warning(f"Error fetching COT data for {market_name}: {e}")
         return pd.DataFrame()
@@ -118,6 +124,7 @@ def cot_short_term_score(df):
     prev = df.iloc[-2]
     nc_change = latest["noncommercial_net"] - prev["noncommercial_net"]  # bullish if positive
     c_change = latest["commercial_net"] - prev["commercial_net"]        # bearish if positive
+
     def scale_net_change(val, bullish=True):
         if bullish:
             if val > 2000:
@@ -205,53 +212,84 @@ def open_interest_score(df):
     else:
         return 1
 
-# --- Price, Volume and Relative Volume Score ---
-def price_volume_rvol_score(df):
-    if df.empty or len(df) < ARV_LOOKBACK_DAYS + 3:
-        return 3
+# --- New Detailed Spectrum Score for Price + Volume + Returns ---
+def calculate_spectrum_score(df):
+    LOOKBACK_DAYS = LOOKBACK_DAYS_SPECTRUM
+    
     df = df.sort_values("date").copy()
-    df["PctChange"] = df["Close"].pct_change() * 100
-    df["AvgVol20"] = df["Volume"].rolling(ARV_LOOKBACK_DAYS).mean()
-    df = df.dropna(subset=["AvgVol20"])
-    df["RVOL"] = df["Volume"] / df["AvgVol20"]
-    recent_rvols = df["RVOL"].tail(ARV_LOOKBACK_DAYS)
-    p30 = np.percentile(recent_rvols, 30)
-    p70 = np.percentile(recent_rvols, 70)
-    p90 = np.percentile(recent_rvols, 90)
-    today = df.iloc[-1]
-    yesterday = df.iloc[-2]
-    two_days_ago = df.iloc[-3]
-    price_chg_today = today["PctChange"]
-    rvol_today = today["RVOL"]
-    def is_trending_up():
-        return (today["Close"] > yesterday["Close"] > two_days_ago["Close"]) and \
-               (today["Volume"] > df["AvgVol20"].iloc[-1]) and \
-               (yesterday["Volume"] > df["AvgVol20"].iloc[-1]) and \
-               (two_days_ago["Volume"] > df["AvgVol20"].iloc[-1])
-    def is_trending_down():
-        return (today["Close"] < yesterday["Close"] < two_days_ago["Close"]) and \
-               (today["Volume"] > df["AvgVol20"].iloc[-1]) and \
-               (yesterday["Volume"] > df["AvgVol20"].iloc[-1]) and \
-               (two_days_ago["Volume"] > df["AvgVol20"].iloc[-1])
-    if price_chg_today >= 2 and rvol_today >= p90:
-        return 5
-    if 1 <= price_chg_today < 2 and p70 <= rvol_today < p90:
-        return 4
-    if price_chg_today <= -2 and rvol_today >= p90:
-        return 0
-    if -2 < price_chg_today <= -1 and p70 <= rvol_today < p90:
-        return 1
-    if is_trending_up():
-        return 4
-    if is_trending_down():
-        return 1
-    if abs(price_chg_today) < 1 and p30 <= rvol_today <= p70:
-        return 3
-    return 3
+    if len(df) < LOOKBACK_DAYS + 1:
+        return 3  # Neutral default if insufficient data
+    
+    recent = df.iloc[-(LOOKBACK_DAYS + 1):].reset_index(drop=True)
+    
+    # Calculate daily returns (%)
+    recent['DailyReturn'] = recent['Close'].pct_change() * 100
+    
+    returns = recent['DailyReturn'].iloc[1:]  # drop first NaN
+    
+    # Assign weights per return scenario
+    weights = []
+    for r in returns:
+        if r >= 0:
+            # Accumulation return scenarios
+            if 0 <= r < 1:
+                weights.append(1)
+            elif 1 <= r < 2:
+                weights.append(2)
+            elif r >= 2:
+                weights.append(3)
+            else:
+                weights.append(0)
+        else:
+            # Distribution return scenarios
+            if -1 <= r < 0:
+                weights.append(-1)
+            elif -2 <= r < -1:
+                weights.append(-2)
+            elif r < -2:
+                weights.append(-3)
+            else:
+                weights.append(0)
+    
+    accumulation_distribution_score = sum(weights)
+    
+    # Calculate trend weight with linear regression slope
+    prices = recent['Close'].values.reshape(-1, 1)
+    X = np.arange(len(prices)).reshape(-1, 1)
+    model = LinearRegression()
+    model.fit(X, prices)
+    slope = model.coef_[0][0]
+    
+    relative_slope = slope / prices[0][0]
+    
+    strong_threshold = 0.001
+    moderate_threshold = 0.0005
+    
+    if relative_slope > strong_threshold:
+        trend_weight = 3  # Strong uptrend
+    elif relative_slope > moderate_threshold:
+        trend_weight = 2  # Moderate uptrend
+    elif -moderate_threshold <= relative_slope <= moderate_threshold:
+        trend_weight = 0  # Sideways
+    elif relative_slope > -strong_threshold:
+        trend_weight = -2  # Moderate downtrend
+    else:
+        trend_weight = -3  # Strong downtrend
+    
+    combined_score = accumulation_distribution_score + trend_weight
+    
+    # Normalize combined score to 0-5 scale
+    min_score = -93  # 30 * (-3.0) + (-3)
+    max_score = 93   # 30 * 3 + 3
+    norm_score = (combined_score - min_score) / (max_score - min_score) * 5
+    norm_score = max(0, min(5, norm_score))
+    
+    return norm_score
 
 # --- Compute Overall Health ---
 def compute_asset_health(yahoo_df, cot_df, asset_name):
-    pv_score = price_volume_rvol_score(yahoo_df)
+    pv_score = calculate_spectrum_score(yahoo_df)
+    cot_df = compute_cot_net_positions(cot_df)
     cot_st = cot_short_term_score(cot_df)
     cot_lt = cot_long_term_score(cot_df)
     cot_score = cot_st * COT_SHORT_TERM_WT + cot_lt * COT_LONG_TERM_WT
@@ -271,7 +309,7 @@ def health_color(score):
     }
     return colors.get(score, "⚪️ Unknown")
 
-# --- MAIN ---
+# --- UI ---
 
 st.title("Gold & Silver Health Gauge")
 
@@ -286,42 +324,29 @@ if start_date >= end_date:
 if st.button("Reload Data"):
     st.cache_data.clear()
 
-results = []
-for market in COT_MARKETS:
-    st.write(f"Fetching data for {market} ...")
-    yahoo_symbol = "GC=F" if "GOLD" in market else "SI=F"
-    try:
-        yahoo_df = fetch_yahoo_data(yahoo_symbol, start_date, end_date)
-        cot_df_raw = fetch_cot_data(market)
-        if cot_df_raw.empty:
-            st.warning(f"No COT data available for {market}")
+cols = st.columns(len(COT_MARKETS))
+for i, market in enumerate(COT_MARKETS):
+    with cols[i]:
+        st.header(market)
+        yahoo_symbol = YAHOO_SYMBOLS.get(market)
+        if not yahoo_symbol:
+            st.error(f"Yahoo symbol for {market} not found.")
             continue
-        cot_df = compute_cot_net_positions(cot_df_raw)
+        
+        # Fetch Data
+        yahoo_df = fetch_yahoo_data(yahoo_symbol, start_date, end_date)
+        cot_df = fetch_cot_data(market)
+        
+        if yahoo_df.empty:
+            st.warning("No Yahoo data available.")
+            continue
+        if cot_df.empty:
+            st.warning("No COT data available.")
+            continue
+        
         health, pv_score, cot_score, oi_score = compute_asset_health(yahoo_df, cot_df, market)
-        results.append(
-            {
-                "Market": market,
-                "Health": health,
-                "Health Color": health_color(health),
-                "Price/Volume Score": pv_score,
-                "COT Score": cot_score,
-                "Open Interest Score": oi_score,
-            }
-        )
-    except Exception as e:
-        st.error(f"Error processing {market}: {e}")
-
-if results:
-    df_results = pd.DataFrame(results)
-    st.dataframe(df_results)
-
-    # Show a gauge bar for each asset
-    for r in results:
-        st.markdown(f"### {r['Market']}")
-        st.progress(min(max(r["Health"] / 5, 0), 1))
-        st.write(f"**Health Score:** {r['Health']} ({r['Health Color']})")
-        st.write(f"Price/Volume Score: {r['Price/Volume Score']:.2f}")
-        st.write(f"COT Score: {r['COT Score']:.2f}")
-        st.write(f"Open Interest Score: {r['Open Interest Score']:.2f}")
-else:
-    st.info("No results to display yet. Adjust date range or reload data.")
+        
+        st.markdown(f"**Health Gauge Score:** {health} / 5  {health_color(health)}")
+        st.write(f"- Price + Volume Spectrum Score: {pv_score:.2f}")
+        st.write(f"- COT Score (Short+Long Term): {cot_score:.2f}")
+        st.write(f"- Open Interest Score: {oi_score:.2f}"
