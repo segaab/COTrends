@@ -26,3 +26,4 @@ pandas
 fredapi
 scikit-learn
 statsmodels
+pmdarima
