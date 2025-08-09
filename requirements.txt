@@ -25,3 +25,4 @@ supabase
 pandas
 fredapi
 scikit-learn
+statsmodels
