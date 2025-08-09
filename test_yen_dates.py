@@ -1,13 +1,23 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import datetime
+from datetime import datetime, timedelta
 from sodapy import Socrata
+from yahooquery import Ticker
 from sklearn.linear_model import LinearRegression
-import plotly.graph_objects as go
-import requests  # For catching timeout exceptions
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import os
+import requests
 
-# Constants
+# ==============================
+# CONFIGURATION & CONSTANTS
+# ==============================
+TIMEOUT = 60  # seconds
+UPTREND_THRESHOLD = 0.04  # +4%
+DOWNTREND_THRESHOLD = -0.04  # -4%
+LOOKBACK_DAYS_SPECTRUM = 30  # ~6 weeks trading days
+
 COT_MARKETS = [
     "GOLD - COMMODITY EXCHANGE INC.",
     "SILVER - COMMODITY EXCHANGE INC.",
@@ -18,236 +28,208 @@ YAHOO_SYMBOLS = {
     "SILVER - COMMODITY EXCHANGE INC.": "SI=F",
 }
 
-LOOKBACK_DAYS_SPECTRUM = 30  # Approx 6 weeks of trading days
+# Weights for health calculation
 WEIGHT_PV_RVOL = 0.40
 WEIGHT_COT = 0.35
 WEIGHT_OI = 0.25
-COT_SHORT_TERM_WT = 0.40
-COT_LONG_TERM_WT = 0.60
 
-APP_TOKEN = "WSCaavlIcDgtLVZbJA1FKkq40"
+# ==============================
+# SOCrata Client Setup
+# ==============================
+APP_TOKEN = "WSCaavlIcDgtLVZbJA1FKkq40"  # Replace with your app token or set env variable
 
-# --- Caching Socrata client ---
 @st.cache_resource(show_spinner=False)
 def get_socrata_client():
-    return Socrata("publicreporting.cftc.gov", APP_TOKEN)
+    return Socrata("publicreporting.cftc.gov", APP_TOKEN, timeout=TIMEOUT)
 
-# --- Fetch COT Data ---
+# ==============================
+# DATA FETCHING
+# ==============================
 @st.cache_data(ttl=60*60*6, show_spinner=True)
 def fetch_cot_data(market_name):
     client = get_socrata_client()
     where_clause = f"market_and_exchange_name='{market_name}'"
     try:
-        results = client.get("6dca-aqww", where=where_clause, order="report_date DESC", limit=1000, timeout=60)
-    except requests.exceptions.Timeout:
-        st.error("Timeout occurred while fetching COT data. Please try again later.")
-        return pd.DataFrame()
-    except requests.exceptions.HTTPError as e:
-        st.error(f"HTTP error fetching COT data: {e}")
-        return pd.DataFrame()
-    except Exception as e:
-        st.error(f"Unexpected error fetching COT data: {e}")
+        results = client.get("6dca-aqww", where=where_clause, order="report_date DESC", limit=1000)
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error fetching COT data: {e}")
         return pd.DataFrame()
 
     if not results:
         return pd.DataFrame()
     df = pd.DataFrame.from_records(results)
     df["report_date"] = pd.to_datetime(df["report_date"])
-    for col in [
+    numeric_cols = [
         "noncomm_positions_long_all", "noncomm_positions_short_all", "noncomm_positions_spread_all",
         "comm_positions_long_all", "comm_positions_short_all",
         "tot_rept_positions_long_all", "tot_rept_positions_short",
         "nonrept_positions_long_all", "nonrept_positions_short_all",
         "open_interest_all"
-    ]:
+    ]
+    for col in numeric_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.sort_values("report_date")
 
-# --- Fetch Yahoo Data ---
 @st.cache_data(ttl=60*60*2, show_spinner=True)
 def fetch_yahoo_data(symbol, start_date, end_date):
-    import yahooquery as yq
     try:
-        data = yq.Ticker(symbol).history(start=start_date, end=end_date)
-    except Exception:
-        return pd.DataFrame()
-    if data.empty:
-        return pd.DataFrame()
-    if isinstance(data.index, pd.MultiIndex):
-        data.reset_index(inplace=True)
-    else:
+        ticker = Ticker(symbol, asynchronous=False, timeout=TIMEOUT)
+        data = ticker.history(start=start_date, end=end_date)
+        if data.empty:
+            st.warning(f"No Yahoo data for {symbol}.")
+            return pd.DataFrame()
         data = data.reset_index()
-    # Normalize columns to lowercase for safe access
-    data.columns = [col.lower() for col in data.columns]
-    # Ensure date column exists
-    if "date" not in data.columns:
+        data["date"] = pd.to_datetime(data["date"]).dt.date
+        # Ensure columns lowercase to unify
+        data.columns = [c.lower() for c in data.columns]
+        return data
+    except requests.exceptions.RequestException as e:
+        st.error(f"Network error fetching Yahoo data: {e}")
         return pd.DataFrame()
-    data["date"] = pd.to_datetime(data["date"]).dt.date
-    for c in ["close", "volume", "openinterest"]:
-        if c not in data.columns:
-            data[c] = np.nan
-    data = data[["date", "close", "volume", "openinterest"]]
-    data.rename(columns={"close": "Close", "volume": "Volume", "openinterest": "OpenInterest"}, inplace=True)
-    return data.dropna(subset=["Close"])
 
-# --- Calculate Relative Volume (RVOL) ---
+# ==============================
+# DATA PROCESSING
+# ==============================
 def calculate_rvol(df):
-    df = df.sort_values("date").copy()
-    df["AvgVol20"] = df["Volume"].rolling(window=20).mean()
-    df["RVOL"] = df["Volume"] / df["AvgVol20"]
-    df.dropna(subset=["RVOL"], inplace=True)
+    df = df.sort_values("date")
+    df["avgvol20"] = df["volume"].rolling(window=20).mean()
+    df["rvol"] = df["volume"] / df["avgvol20"]
+    df.dropna(subset=["rvol"], inplace=True)
     return df
 
-# --- Calculate net positions for COT ---
 def compute_cot_net_positions(cot_df):
-    cot_df = cot_df.sort_values("report_date").copy()
+    cot_df = cot_df.sort_values("report_date")
     cot_df["net_comm"] = cot_df["comm_positions_long_all"] - cot_df["comm_positions_short_all"]
     cot_df["net_noncomm"] = cot_df["noncomm_positions_long_all"] - cot_df["noncomm_positions_short_all"]
     return cot_df
 
-# --- Calculate Short-term COT Score ---
 def cot_short_term_score(cot_df):
     if cot_df.shape[0] < 2:
-        return 3  # Neutral
+        return 3
     latest = cot_df.iloc[-1]
     prev = cot_df.iloc[-2]
     delta_comm = latest["net_comm"] - prev["net_comm"]
     delta_noncomm = latest["net_noncomm"] - prev["net_noncomm"]
-
-    comm_score = 5 if delta_comm > 0 else (0 if delta_comm < 0 else 3)
-    noncomm_score = 5 if delta_noncomm > 0 else (0 if delta_noncomm < 0 else 3)
+    comm_score = 5 if delta_comm > 0 else 0 if delta_comm < 0 else 3
+    noncomm_score = 5 if delta_noncomm > 0 else 0 if delta_noncomm < 0 else 3
     return (comm_score + noncomm_score) / 2
 
-# --- Calculate Long-term COT Score ---
 def cot_long_term_score(cot_df):
     if cot_df.shape[0] < 12:
-        return 3  # Neutral
+        return 3
     df_12 = cot_df.tail(12)
     net_comm = df_12["net_comm"].values
     net_noncomm = df_12["net_noncomm"].values
     comm_trend = np.polyfit(range(12), net_comm, 1)[0]
     noncomm_trend = np.polyfit(range(12), net_noncomm, 1)[0]
-    comm_score = 5 if comm_trend < 0 else (0 if comm_trend > 0 else 3)
-    noncomm_score = 5 if noncomm_trend > 0 else (0 if noncomm_trend < 0 else 3)
+    comm_score = 5 if comm_trend < 0 else 0 if comm_trend > 0 else 3
+    noncomm_score = 5 if noncomm_trend > 0 else 0 if noncomm_trend < 0 else 3
     return (comm_score + noncomm_score) / 2
 
-# --- Open Interest Score ---
 def open_interest_score(yahoo_df):
-    if yahoo_df.empty or "OpenInterest" not in yahoo_df.columns or yahoo_df["OpenInterest"].isna().all():
+    if yahoo_df.empty or "openinterest" not in yahoo_df.columns or yahoo_df["openinterest"].isna().all():
         return 3
-    oi = yahoo_df["OpenInterest"].dropna()
+    oi = yahoo_df["openinterest"].dropna()
     if len(oi) < 20:
         return 3
     slope = np.polyfit(range(len(oi)), oi, 1)[0]
-    return 5 if slope > 0 else (0 if slope < 0 else 3)
+    return 5 if slope > 0 else 0 if slope < 0 else 3
 
-# --- Spectrum Score and Event Detection ---
+# ==============================
+# SCENARIO & SPECTRUM SCORING
+# ==============================
+def classify_scenario(ret):
+    if ret > UPTREND_THRESHOLD:
+        return "Uptrend"
+    elif ret < DOWNTREND_THRESHOLD:
+        return "Downtrend"
+    else:
+        return "Accumulation/Distribution"
+
 def calculate_spectrum_score(df):
-    df = df.sort_values("date").copy()
-    df = df.tail(LOOKBACK_DAYS_SPECTRUM)
-    if len(df) < LOOKBACK_DAYS_SPECTRUM:
-        return 3, pd.DataFrame()  # neutral if insufficient data
-
+    df = df.sort_values("date").tail(LOOKBACK_DAYS_SPECTRUM).copy()
     df = calculate_rvol(df)
     if df.empty:
         return 3, pd.DataFrame()
-
-    rvol_78th = df["RVOL"].quantile(0.78)
+    rvol_78th = df["rvol"].quantile(0.78)
 
     total_weight = 0
     count = 0
-    detected_points = []
+    points = []
 
-    def accumulation_weight(ret_pct):
-        if 0 <= ret_pct < 1:
+    def acc_weight(r):
+        if 0 <= r < 0.01:
             return 1
-        elif 1 <= ret_pct < 2:
+        elif 0.01 <= r < 0.02:
             return 2
-        elif ret_pct >= 2:
+        elif r >= 0.02:
             return 3
         return 0
 
-    def distribution_weight(ret_pct):
-        if -1 <= ret_pct < 0:
+    def dist_weight(r):
+        if -0.01 <= r < 0:
             return -1
-        elif -2 <= ret_pct < -1:
+        elif -0.02 <= r < -0.01:
             return -2
-        elif ret_pct < -2:
+        elif r < -0.02:
             return -3
         return 0
 
-    # Trend detection via linear regression slope of price
-    if len(df) < 10:
-        trend_score = 3
-    else:
-        prices = df["Close"].values.reshape(-1, 1)
-        days = np.arange(len(prices)).reshape(-1, 1)
-        model = LinearRegression()
-        model.fit(days, prices)
-        slope = model.coef_[0][0]
-        if slope > 0.1:
-            trend_score = 5
-        elif 0.05 < slope <= 0.1:
-            trend_score = 4
-        elif -0.05 <= slope <= 0.05:
-            trend_score = 3
-        elif -0.1 <= slope < -0.05:
-            trend_score = 2
-        else:
-            trend_score = 1
-
-    for idx in range(1, len(df) - 1):
-        row = df.iloc[idx]
-        if row["RVOL"] >= rvol_78th:
-            prev_close = df.iloc[idx - 1]["Close"]
+    for i in range(1, len(df) - 1):
+        row = df.iloc[i]
+        if row["rvol"] >= rvol_78th:
+            prev_close = df.iloc[i - 1]["close"]
             if prev_close == 0:
                 continue
-            ret_pct = ((row["Close"] - prev_close) / prev_close) * 100
+            ret_pct = (row["close"] - prev_close) / prev_close
             if ret_pct >= 0:
-                weight = accumulation_weight(ret_pct)
-                point_type = "Accumulation"
+                weight = acc_weight(ret_pct)
+                scenario = "Accumulation"
             else:
-                weight = distribution_weight(ret_pct)
-                point_type = "Distribution"
-
+                weight = dist_weight(ret_pct)
+                scenario = "Distribution"
             total_weight += weight
             count += 1
 
-            next_close = df.iloc[idx + 1]["Close"]
-            next_ret = ((next_close - row["Close"]) / row["Close"]) * 100
-
-            detected_points.append({
+            next_close = df.iloc[i + 1]["close"]
+            next_ret = (next_close - row["close"]) / row["close"]
+            points.append({
                 "Date": row["date"],
-                "Type": point_type,
-                "Return %": round(ret_pct, 2),
-                "Next Day Return %": round(next_ret, 2),
+                "Scenario": scenario,
+                "Return": ret_pct,
                 "Weight": weight,
+                "Next Day Return": next_ret
             })
 
-    if count == 0:
-        base_score = 3
-    else:
-        avg_weight = total_weight / count
-        base_score = (avg_weight + 3) / 6 * 5
-        base_score = max(0, min(5, base_score))
+    avg_weight = total_weight / count if count else 0
+    base_score = max(0, min(5, (avg_weight + 3) / 6 * 5))
+
+    prices = df["close"].values.reshape(-1, 1)
+    days = np.arange(len(prices)).reshape(-1, 1)
+    model = LinearRegression()
+    model.fit(days, prices)
+    slope = model.coef_[0][0]
+    trend_score = 5 if slope > 0.1 else 4 if slope > 0.05 else 3 if abs(slope) <= 0.05 else 2 if slope > -0.1 else 1
 
     combined_score = 0.7 * base_score + 0.3 * trend_score
-    return combined_score, pd.DataFrame(detected_points)
+    points_df = pd.DataFrame(points)
+    return combined_score, points_df
 
-# --- Compute overall asset health ---
-def compute_asset_health(yahoo_df, cot_df):
+# ==============================
+# HEALTH CALCULATION
+# ==============================
+def compute_health(yahoo_df, cot_df):
     pv_score, points_df = calculate_spectrum_score(yahoo_df)
     cot_df = compute_cot_net_positions(cot_df)
     cot_st = cot_short_term_score(cot_df)
     cot_lt = cot_long_term_score(cot_df)
-    cot_score = cot_st * COT_SHORT_TERM_WT + cot_lt * COT_LONG_TERM_WT
+    cot_score = cot_st * 0.4 + cot_lt * 0.6
     oi_score = open_interest_score(yahoo_df)
     health_raw = pv_score * WEIGHT_PV_RVOL + cot_score * WEIGHT_COT + oi_score * WEIGHT_OI
     health = int(round(health_raw))
     return health, pv_score, cot_score, oi_score, points_df
 
-# --- Health color ---
 def health_color(score):
     colors = {
         0: "🔴 Red",
@@ -259,77 +241,49 @@ def health_color(score):
     }
     return colors.get(score, "⚪ Neutral")
 
-# --- Plot accumulation/distribution point and next day ---
-def plot_point_and_next_day(yahoo_df, point_date):
-    df = yahoo_df.copy()
-    df["date"] = pd.to_datetime(df["date"]).dt.date
-
-    if point_date not in df["date"].values:
-        st.warning(f"Date {point_date} not in price data.")
+# ==============================
+# PLOTTING
+# ==============================
+def plot_points_with_next_day(yahoo_df, points_df, selected_index):
+    if points_df.empty:
+        st.info("No significant points detected.")
         return
-
-    idx = df.index[df["date"] == point_date][0]
-
+    point = points_df.iloc[selected_index]
+    date = point["Date"]
+    dates = pd.to_datetime(yahoo_df["date"])
+    idx = dates[dates.dt.date == pd.to_datetime(date).date()].index
+    if len(idx) == 0:
+        st.warning("Selected date not in price data.")
+        return
+    idx = idx[0]
     start_idx = max(0, idx - 1)
-    end_idx = min(len(df) - 1, idx + 1)
+    end_idx = min(len(yahoo_df) - 1, idx + 1)
+    plot_df = yahoo_df.iloc[start_idx:end_idx + 1]
 
-    plot_df = df.loc[start_idx:end_idx].reset_index(drop=True)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.plot(plot_df["date"], plot_df["close"], marker="o", linestyle="-", color="blue", label="Close Price")
+    ax.set_title(f"{point['Scenario']} on {date} and Next Day Price Action")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Price")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    plt.xticks(rotation=45)
+    ax.legend()
+    st.pyplot(fig)
 
-    fig = go.Figure()
-
-    fig.add_trace(go.Scatter(
-        x=plot_df["date"],
-        y=plot_df["Close"],
-        mode="lines+markers",
-        line=dict(color="blue"),
-        name="Close Price",
-    ))
-
-    # Highlight event day
-    fig.add_vrect(
-        x0=plot_df["date"].iloc[1],
-        x1=plot_df["date"].iloc[1],
-        fillcolor="LightGreen" if plot_df["date"].iloc[1] == point_date else "LightCoral",
-        opacity=0.3,
-        layer="below",
-        line_width=0,
-    )
-    # Highlight next day
-    if end_idx > idx:
-        fig.add_vrect(
-            x0=plot_df["date"].iloc[2],
-            x1=plot_df["date"].iloc[2],
-            fillcolor="LightBlue",
-            opacity=0.3,
-            layer="below",
-            line_width=0,
-        )
-
-    fig.update_layout(
-        title=f"Price around {point_date} (Event day & next day)",
-        xaxis_title="Date",
-        yaxis_title="Price",
-        xaxis_rangeslider_visible=False,
-        height=400,
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-# --- Main Streamlit App ---
+# ==============================
+# STREAMLIT UI
+# ==============================
 st.set_page_config(page_title="Gold & Silver Health Gauge", layout="wide")
-
 st.title("Gold & Silver Health Gauge")
+st.markdown("""
+This dashboard evaluates the health of Gold and Silver markets using:
+- COT data (Commitments of Traders)
+- Price, Volume & Relative Volume spectrum analysis
+- Open Interest trends
+""")
 
-st.markdown(
-    """
-    This dashboard evaluates the health of Gold and Silver markets using:
-    - COT data (Commitments of Traders)
-    - Price, Volume & Relative Volume spectrum analysis
-    - Open Interest trends
-    """
-)
-
-today = datetime.date.today()
-default_start = today - datetime.timedelta(days=365)
+today = datetime.today().date()
+default_start = today - timedelta(days=365)
 
 start_date = st.date_input("Start Date", value=default_start)
 end_date = st.date_input("End Date", value=today)
@@ -346,31 +300,6 @@ cols = st.columns(len(COT_MARKETS))
 for i, market in enumerate(COT_MARKETS):
     with cols[i]:
         st.header(market)
-        yahoo_symbol = YAHOO_SYMBOLS.get(market)
-        if not yahoo_symbol:
-            st.error(f"Yahoo symbol for {market} not found.")
-            continue
-
-        with st.spinner(f"Fetching Yahoo data for {market}..."):
-            yahoo_df = fetch_yahoo_data(yahoo_symbol, start_date.isoformat(), end_date.isoformat())
-        with st.spinner(f"Fetching COT data for {market}..."):
-            cot_df = fetch_cot_data(market)
-
-        if yahoo_df.empty:
-            st.warning("No Yahoo data available.")
-            continue
-        if cot_df.empty:
-            st.warning("No COT data available.")
-            continue
-
-        health, pv_score, cot_score, oi_score, points_df = compute_asset_health(yahoo_df, cot_df)
-
-        st.markdown(f"### Health Gauge Score: {health} / 5 {health_color(health)}")
-        st.write(f"- Price + Volume Spectrum Score: {pv_score:.2f}")
-        st.write(f"- COT Score (Short+Long Term): {cot_score:.2f}")
-        st.write(f"- Open Interest Score: {oi_score:.2f}")
-
-        if not points_df.empty:
-            st.subheader("Accumulation/Distribution Points & Next Day Returns")
-            point_idx = st.select_slider(
-                f"Select event date for {market}:",
+        symbol = YAHOO_SYMBOLS.get(market)
+        if not symbol:
+            st.error
