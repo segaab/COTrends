@@ -98,9 +98,21 @@ def main():
         st.subheader("Combined Interest Rate (SOFR & Fed Funds Futures)")
         st.line_chart(combined_df.set_index('Date')['Combined'])
 
-        # Fix to ensure 'Date' is a column in treasury
+        # Debug prints before resetting index
+        st.write("=== Treasury DataFrame BEFORE reset_index ===")
+        st.write(f"Columns: {treasury.columns.tolist()}")
+        st.write(f"Index name: {treasury.index.name}")
+        st.write(treasury.head())
+
+        # Reset index if index is 'Date' or 'date'
         if treasury.index.name in ['Date', 'date']:
             treasury = treasury.reset_index()
+
+        # Debug prints after resetting index
+        st.write("=== Treasury DataFrame AFTER reset_index ===")
+        st.write(f"Columns: {treasury.columns.tolist()}")
+        st.write(f"Index name: {treasury.index.name}")
+        st.write(treasury.head())
 
         treasury['ImpliedVol'] = calc_implied_volatility(treasury['Close'])
 
@@ -115,9 +127,20 @@ def main():
             combined_df = st.session_state['combined_df']
             treasury = st.session_state['treasury']
 
-            # Ensure 'Date' is a column before extracting exog_df
+            # Debug prints before preparing exog_df
+            st.write("=== Treasury DataFrame BEFORE preparing exog_df ===")
+            st.write(f"Columns: {treasury.columns.tolist()}")
+            st.write(f"Index name: {treasury.index.name}")
+            st.write(treasury.head())
+
+            # Reset index if needed
             if treasury.index.name in ['Date', 'date']:
                 treasury = treasury.reset_index()
+
+            # Check if 'Date' column exists
+            if 'Date' not in treasury.columns:
+                st.error("Error: 'Date' column missing from treasury DataFrame!")
+                st.stop()
 
             exog_df = treasury[['Date', 'ImpliedVol']].copy()
             exog_df.set_index('Date', inplace=True)
