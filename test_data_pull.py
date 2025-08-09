@@ -17,47 +17,56 @@ st.title("Treasury Rates Forecast Dashboard")
 
 @st.cache_data(ttl=300)
 def get_latest_weekly_data():
-    query = (
-        supabase
-        .from_("hourly_forecasts")
-        .select("forecast_generated_at")
-        .order("forecast_generated_at", desc=True)
-        .limit(1)
-    )
-    latest_run = query.execute()
+    try:
+        query = (
+            supabase
+            .from_("hourly_forecasts")
+            .select("forecast_generated_at")
+            .order("forecast_generated_at", desc=True)
+            .limit(1)
+        )
+        latest_run = query.execute()
 
-    if latest_run.error:
-        st.error(f"Error fetching latest forecast_generated_at: {latest_run.error.message}")
+        error = getattr(latest_run, "error", None)
+        if error:
+            st.error(f"Error fetching latest forecast_generated_at: {error}")
+            return None
+
+        data = getattr(latest_run, "data", None)
+        if not data or len(data) == 0:
+            st.warning("No forecast runs found in the database.")
+            return None
+
+        forecast_generated_at = data[0].get("forecast_generated_at")
+        if not forecast_generated_at:
+            st.warning("No forecast_generated_at value found.")
+            return None
+
+        data_response = (
+            supabase
+            .from_("hourly_forecasts")
+            .select("*")
+            .eq("forecast_generated_at", forecast_generated_at)
+            .order("forecast_time", asc=True)
+        ).execute()
+
+        error2 = getattr(data_response, "error", None)
+        if error2:
+            st.error(f"Error fetching forecast data: {error2}")
+            return None
+
+        data2 = getattr(data_response, "data", None)
+        if not data2:
+            st.warning("No forecast data found for latest forecast_generated_at.")
+            return None
+
+        df = pd.DataFrame(data2)
+        df["forecast_time"] = pd.to_datetime(df["forecast_time"])
+        return df
+
+    except Exception as e:
+        st.error(f"Unexpected error fetching data: {e}")
         return None
-
-    if not latest_run.data or len(latest_run.data) == 0:
-        st.warning("No forecast runs found in the database.")
-        return None
-
-    forecast_generated_at = latest_run.data[0]["forecast_generated_at"]
-    if not forecast_generated_at:
-        st.warning("No forecast_generated_at value found.")
-        return None
-
-    data_response = (
-        supabase
-        .from_("hourly_forecasts")
-        .select("*")
-        .eq("forecast_generated_at", forecast_generated_at)
-        .order("forecast_time", asc=True)
-    ).execute()
-
-    if data_response.error:
-        st.error(f"Error fetching forecast data: {data_response.error.message}")
-        return None
-
-    if not data_response.data:
-        st.warning("No forecast data found for latest forecast_generated_at.")
-        return None
-
-    df = pd.DataFrame(data_response.data)
-    df["forecast_time"] = pd.to_datetime(df["forecast_time"])
-    return df
 
 def plot_forecast(df: pd.DataFrame):
     import altair as alt
