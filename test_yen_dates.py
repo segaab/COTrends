@@ -24,7 +24,7 @@ WEIGHT_OI = 0.25
 COT_SHORT_TERM_WT = 0.40
 COT_LONG_TERM_WT = 0.60
 
-APP_TOKEN = "WSCaavlIcDgtLVZbJA1FKkq40"
+APP_TOKEN = "WSCaavlIcDgtLVZbJA1FKkq40" # Replace with your actual Socrata App Token
 
 # --- Caching Socrata client ---
 @st.cache_resource(show_spinner=False)
@@ -40,16 +40,15 @@ def fetch_cot_data(market_name):
     if not results:
         return pd.DataFrame()
     df = pd.DataFrame.from_records(results)
-    # Convert dates
     df["report_date"] = pd.to_datetime(df["report_date"])
-    # Convert numeric columns to float
-    for col in [
+    cols_to_float = [
         "noncomm_positions_long_all", "noncomm_positions_short_all", "noncomm_positions_spread_all",
         "comm_positions_long_all", "comm_positions_short_all",
         "tot_rept_positions_long_all", "tot_rept_positions_short",
         "nonrept_positions_long_all", "nonrept_positions_short_all",
         "open_interest_all"
-    ]:
+    ]
+    for col in cols_to_float:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.sort_values("report_date")
@@ -64,15 +63,12 @@ def fetch_yahoo_data(symbol, start_date, end_date):
         return pd.DataFrame()
     if data.empty:
         return pd.DataFrame()
-    # Flatten multi-index if present
     if isinstance(data.index, pd.MultiIndex):
         data.reset_index(inplace=True)
     else:
         data = data.reset_index()
     data = data.rename(columns={"date": "date"})
-    # Ensure date is datetime.date
     data["date"] = pd.to_datetime(data["date"]).dt.date
-    # Keep only required columns and handle missing ones
     cols_needed = ["date", "close", "volume", "openInterest"]
     for c in cols_needed:
         if c not in data.columns:
@@ -92,72 +88,44 @@ def calculate_rvol(df):
 # --- Calculate net positions for COT ---
 def compute_cot_net_positions(cot_df):
     cot_df = cot_df.sort_values("report_date")
-    # Net positions for commercial and non-commercial traders
     cot_df["net_comm"] = cot_df["comm_positions_long_all"] - cot_df["comm_positions_short_all"]
     cot_df["net_noncomm"] = cot_df["noncomm_positions_long_all"] - cot_df["noncomm_positions_short_all"]
     return cot_df
 
 # --- Calculate Short-term COT Score ---
 def cot_short_term_score(cot_df):
-    # Use last two weeks to calculate change
     if cot_df.shape[0] < 2:
         return 3  # Neutral default
-
     latest = cot_df.iloc[-1]
     prev = cot_df.iloc[-2]
-
     delta_comm = latest["net_comm"] - prev["net_comm"]
     delta_noncomm = latest["net_noncomm"] - prev["net_noncomm"]
-
     # Commercial net longs are bearish (inverse)
-    comm_score = 0
-    if delta_comm > 0:
-        comm_score = 5
-    elif delta_comm < 0:
-        comm_score = 0
-    else:
-        comm_score = 3
-
+    comm_score = 5 if delta_comm < 0 else (0 if delta_comm > 0 else 3)
     # Non-commercial net longs are bullish
-    noncomm_score = 0
-    if delta_noncomm > 0:
-        noncomm_score = 5
-    elif delta_noncomm < 0:
-        noncomm_score = 0
-    else:
-        noncomm_score = 3
-
-    # Weighted average
-    score = (comm_score + noncomm_score) / 2
+    noncomm_score = 5 if delta_noncomm > 0 else (0 if delta_noncomm < 0 else 3)
+    score = comm_score * 0.5 + noncomm_score * 0.5
     return score
 
 # --- Calculate Long-term COT Score ---
 def cot_long_term_score(cot_df):
-    # Use last 12 weeks
     if cot_df.shape[0] < 12:
         return 3  # Neutral default
-
     df_12 = cot_df.tail(12)
     net_comm = df_12["net_comm"].values
     net_noncomm = df_12["net_noncomm"].values
-
     comm_trend = np.polyfit(range(12), net_comm, 1)[0]
     noncomm_trend = np.polyfit(range(12), net_noncomm, 1)[0]
-
-    # Commercial net longs trend bearish if uptrend is negative
     comm_score = 5 if comm_trend < 0 else (0 if comm_trend > 0 else 3)
-    # Non-commercial net longs trend bullish if uptrend is positive
     noncomm_score = 5 if noncomm_trend > 0 else (0 if noncomm_trend < 0 else 3)
-
-    score = (comm_score + noncomm_score) / 2
+    score = comm_score * 0.5 + noncomm_score * 0.5
     return score
 
 # --- Open Interest Score ---
 def open_interest_score(yahoo_df):
     if yahoo_df.empty or "OpenInterest" not in yahoo_df.columns or yahoo_df["OpenInterest"].isna().all():
-        return 3  # Neutral if no data
+        return 3
     oi = yahoo_df["OpenInterest"].dropna()
-    # Check trend over last 20 days
     if len(oi) < 20:
         return 3
     slope = np.polyfit(range(len(oi)), oi, 1)[0]
@@ -173,19 +141,14 @@ def calculate_spectrum_score(df):
     df = df.sort_values("date").copy()
     df = df.tail(LOOKBACK_DAYS_SPECTRUM)
     if len(df) < LOOKBACK_DAYS_SPECTRUM:
-        return 3, pd.DataFrame()  # neutral if insufficient data, no points
-
+        return 3, pd.DataFrame()
     df = calculate_rvol(df)
     if df.empty:
         return 3, pd.DataFrame()
-
     rvol_78th = df["RVOL"].quantile(0.78)
-
     total_weight = 0
     count = 0
-
     detected_points = []
-
     def accumulation_weight(ret_pct):
         if 0 <= ret_pct < 1:
             return 1
@@ -194,7 +157,6 @@ def calculate_spectrum_score(df):
         elif ret_pct >= 2:
             return 3
         return 0
-
     def distribution_weight(ret_pct):
         if -1 <= ret_pct < 0:
             return -1
@@ -203,7 +165,6 @@ def calculate_spectrum_score(df):
         elif ret_pct < -2:
             return -3
         return 0
-
     # Trend detection via linear regression slope of price
     if len(df) < 10:
         trend_score = 3
@@ -213,18 +174,15 @@ def calculate_spectrum_score(df):
         model = LinearRegression()
         model.fit(days, prices)
         slope = model.coef_[0][0]
-        if slope > 0.1:
+        if slope > 0.04:
             trend_score = 5
-        elif 0.05 < slope <= 0.1:
+        elif 0 < slope <= 0.04:
             trend_score = 4
-        elif -0.05 <= slope <= 0.05:
-            trend_score = 3
-        elif -0.1 <= slope < -0.05:
-            trend_score = 2
-        else:
+        elif -0.04 <= slope <= 0:
             trend_score = 1
-
-    for idx in range(1, len(df) - 1):  # leave room for next day
+        else:
+            trend_score = 0
+    for idx in range(1, len(df) - 1):
         row = df.iloc[idx]
         if row["RVOL"] >= rvol_78th:
             prev_close = df.iloc[idx - 1]["Close"]
@@ -237,13 +195,10 @@ def calculate_spectrum_score(df):
             else:
                 weight = distribution_weight(ret_pct)
                 point_type = "Distribution"
-
             total_weight += weight
             count += 1
-
             next_close = df.iloc[idx + 1]["Close"]
             next_ret = ((next_close - row["Close"]) / row["Close"]) * 100
-
             detected_points.append({
                 "Date": row["date"],
                 "Type": point_type,
@@ -251,14 +206,12 @@ def calculate_spectrum_score(df):
                 "Next Day Return %": round(next_ret, 2),
                 "Weight": weight,
             })
-
     if count == 0:
         base_score = 3
     else:
         avg_weight = total_weight / count
         base_score = (avg_weight + 3) / 6 * 5
         base_score = max(0, min(5, base_score))
-
     combined_score = 0.7 * base_score + 0.3 * trend_score
     return combined_score, pd.DataFrame(detected_points)
 
@@ -290,20 +243,14 @@ def health_color(score):
 def plot_point_and_next_day(yahoo_df, point_date):
     df = yahoo_df.copy()
     df["date"] = pd.to_datetime(df["date"]).dt.date
-
     if point_date not in df["date"].values:
         st.warning(f"Date {point_date} not in price data.")
         return
-
     idx = df.index[df["date"] == point_date][0]
-
     start_idx = max(0, idx - 1)
     end_idx = min(len(df) - 1, idx + 1)
-
     plot_df = df.loc[start_idx:end_idx].reset_index(drop=True)
-
     fig = go.Figure()
-
     fig.add_trace(go.Scatter(
         x=plot_df["date"],
         y=plot_df["Close"],
@@ -311,17 +258,16 @@ def plot_point_and_next_day(yahoo_df, point_date):
         line=dict(color="blue"),
         name="Close Price",
     ))
-
-    # Highlight the event day
+    # Highlight event day
     fig.add_vrect(
         x0=plot_df["date"].iloc[1],
         x1=plot_df["date"].iloc[1],
-        fillcolor="LightGreen" if plot_df["date"].iloc[1] == point_date else "LightCoral",
+        fillcolor="LightGreen",
         opacity=0.3,
         layer="below",
         line_width=0,
     )
-    # Highlight the next day
+    # Highlight next day
     if end_idx > idx:
         fig.add_vrect(
             x0=plot_df["date"].iloc[2],
@@ -331,7 +277,6 @@ def plot_point_and_next_day(yahoo_df, point_date):
             layer="below",
             line_width=0,
         )
-
     fig.update_layout(
         title=f"Price around {point_date} (Event day & next day)",
         xaxis_title="Date",
@@ -341,20 +286,16 @@ def plot_point_and_next_day(yahoo_df, point_date):
     )
     st.plotly_chart(fig, use_container_width=True)
 
-
 # --- Main Streamlit App ---
 st.set_page_config(page_title="Gold & Silver Health Gauge", layout="wide")
-
 st.title("Gold & Silver Health Gauge")
 
-st.markdown(
-    """
-    This dashboard evaluates the health of Gold and Silver markets using:
-    - COT data (Commitments of Traders)
-    - Price, Volume & Relative Volume spectrum analysis
-    - Open Interest trends
-    """
-)
+st.markdown("""
+This dashboard evaluates the health of Gold and Silver markets using:
+- COT data (Commitments of Traders)
+- Price, Volume & Relative Volume spectrum analysis
+- Open Interest trends
+""")
 
 today = datetime.date.today()
 default_start = today - datetime.timedelta(days=365)
@@ -400,7 +341,6 @@ for i, market in enumerate(COT_MARKETS):
 
         if not points_df.empty:
             st.subheader("Accumulation/Distribution Points & Next Day Returns")
-            # Select slider to browse points
             point_idx = st.select_slider(
                 f"Select event date for {market}:",
                 options=points_df.index.tolist(),
