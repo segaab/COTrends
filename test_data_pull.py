@@ -89,58 +89,61 @@ def main():
     last_friday = get_last_friday()
     start_date = last_friday - timedelta(days=365)
 
-    st.info(f"Fetching data from {start_date} to {last_friday}")
+    st.info(f"Data range: {start_date} to {last_friday}")
 
-    sofr = fetch_yahoo_data(SOFR_SYMBOL, start_date, last_friday)
-    fedfund = fetch_yahoo_data(FED_FUNDS_SYMBOL, start_date, last_friday)
-    treasury = fetch_yahoo_data(TREASURY_SYMBOL, start_date, last_friday)
+    # Button to trigger forecasting process
+    if st.button("Run Forecast"):
+        with st.spinner("Fetching and processing data..."):
+            sofr = fetch_yahoo_data(SOFR_SYMBOL, start_date, last_friday)
+            fedfund = fetch_yahoo_data(FED_FUNDS_SYMBOL, start_date, last_friday)
+            treasury = fetch_yahoo_data(TREASURY_SYMBOL, start_date, last_friday)
 
-    if sofr is None or fedfund is None or treasury is None:
-        st.stop()
+        if sofr is None or fedfund is None or treasury is None:
+            st.error("Data fetch failed, cannot continue.")
+            st.stop()
 
-    combined_df = combined_interest_rate(sofr, fedfund)
-    st.subheader("Combined Interest Rate (SOFR & Fed Funds Futures)")
-    st.line_chart(combined_df.set_index('Date')['Combined'])
+        combined_df = combined_interest_rate(sofr, fedfund)
+        st.subheader("Combined Interest Rate (SOFR & Fed Funds Futures)")
+        st.line_chart(combined_df.set_index('Date')['Combined'])
 
-    # Fix: ensure 'Date' column exists in treasury before creating exog_df
-    if 'date' in treasury.columns:
-        treasury.rename(columns={'date': 'Date'}, inplace=True)
-    elif treasury.index.name in ['date', 'Date']:
-        treasury.reset_index(inplace=True)
-    if 'Date' not in treasury.columns:
-        treasury['Date'] = treasury.index
+        # Normalize treasury data 'Date' column
+        if 'date' in treasury.columns:
+            treasury.rename(columns={'date': 'Date'}, inplace=True)
+        elif treasury.index.name in ['date', 'Date']:
+            treasury.reset_index(inplace=True)
+        if 'Date' not in treasury.columns:
+            treasury['Date'] = treasury.index
 
-    treasury['ImpliedVol'] = calc_implied_volatility(treasury['Close'])
-    exog_df = treasury[['Date', 'ImpliedVol']].copy()
-    exog_df = exog_df.set_index('Date')
+        treasury['ImpliedVol'] = calc_implied_volatility(treasury['Close'])
+        exog_df = treasury[['Date', 'ImpliedVol']].copy()
+        exog_df = exog_df.set_index('Date')
 
-    st.subheader("Treasury Yield & Implied Volatility")
-    st.line_chart(treasury.set_index('Date')[['Close', 'ImpliedVol']])
+        st.subheader("Treasury Yield & Implied Volatility")
+        st.line_chart(treasury.set_index('Date')[['Close', 'ImpliedVol']])
 
-    st.info("Training ARIMA(1,1,1) with exogenous implied volatility...")
-    model_fit = train_arima_with_exog(combined_df, exog_df)
+        st.info("Training ARIMA(1,1,1) with exogenous implied volatility...")
+        model_fit = train_arima_with_exog(combined_df, exog_df)
 
-    last_vol = exog_df['ImpliedVol'][-1]
-    forecast_index = pd.date_range(start=last_friday + timedelta(days=1), periods=FORECAST_DAYS)
-    exog_forecast = pd.DataFrame({'ImpliedVol': [last_vol]*FORECAST_DAYS}, index=forecast_index)
+        last_vol = exog_df['ImpliedVol'][-1]
+        forecast_index = pd.date_range(start=last_friday + timedelta(days=1), periods=FORECAST_DAYS)
+        exog_forecast = pd.DataFrame({'ImpliedVol': [last_vol]*FORECAST_DAYS}, index=forecast_index)
 
-    forecast_df = forecast(model_fit, exog_forecast, steps=FORECAST_DAYS)
+        forecast_df = forecast(model_fit, exog_forecast, steps=FORECAST_DAYS)
 
-    st.subheader(f"{FORECAST_DAYS}-Day Ahead Forecast")
-    st.line_chart(forecast_df.set_index('Date')['mean'])
+        st.subheader(f"{FORECAST_DAYS}-Day Ahead Forecast")
+        st.line_chart(forecast_df.set_index('Date')['mean'])
 
-    if st.button("Upload data & forecast to Supabase"):
-        input_data = combined_df.set_index('Date')
-        input_data['ImpliedVol'] = exog_df['ImpliedVol']
-        input_data.reset_index(inplace=True)
-
-        forecast_upload_df = forecast_df.rename(columns={
+        # Store the dataframes in session state for upload
+        st.session_state['input_data'] = combined_df.set_index('Date').assign(ImpliedVol=exog_df['ImpliedVol']).reset_index()
+        st.session_state['forecast_data'] = forecast_df.rename(columns={
             'mean': 'Forecast',
             'mean_ci_lower': 'LowerCI',
             'mean_ci_upper': 'UpperCI'
         })[['Date', 'Forecast', 'LowerCI', 'UpperCI']]
 
-        upload_to_supabase(input_data, forecast_upload_df)
+    if st.session_state.get('input_data') is not None and st.session_state.get('forecast_data') is not None:
+        if st.button("Upload data & forecast to Supabase"):
+            upload_to_supabase(st.session_state['input_data'], st.session_state['forecast_data'])
 
 if __name__ == "__main__":
     main()
