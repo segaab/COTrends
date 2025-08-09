@@ -100,9 +100,15 @@ def main():
     st.subheader("Combined Interest Rate (SOFR & Fed Funds Futures)")
     st.line_chart(combined_df.set_index('Date')['Combined'])
 
-    treasury['ImpliedVol'] = calc_implied_volatility(treasury['Close'])
+    # Fix: ensure 'Date' column exists in treasury before creating exog_df
     if 'date' in treasury.columns:
         treasury.rename(columns={'date': 'Date'}, inplace=True)
+    elif treasury.index.name in ['date', 'Date']:
+        treasury.reset_index(inplace=True)
+    if 'Date' not in treasury.columns:
+        treasury['Date'] = treasury.index
+
+    treasury['ImpliedVol'] = calc_implied_volatility(treasury['Close'])
     exog_df = treasury[['Date', 'ImpliedVol']].copy()
     exog_df = exog_df.set_index('Date')
 
