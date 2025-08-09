@@ -98,13 +98,9 @@ def main():
         st.subheader("Combined Interest Rate (SOFR & Fed Funds Futures)")
         st.line_chart(combined_df.set_index('Date')['Combined'])
 
-        # Prepare treasury exogenous variable
-        if 'date' in treasury.columns:
-            treasury.rename(columns={'date': 'Date'}, inplace=True)
-        elif treasury.index.name in ['date', 'Date']:
-            treasury.reset_index(inplace=True)
-        if 'Date' not in treasury.columns:
-            treasury['Date'] = treasury.index
+        # Fix to ensure 'Date' is a column in treasury
+        if treasury.index.name in ['Date', 'date']:
+            treasury = treasury.reset_index()
 
         treasury['ImpliedVol'] = calc_implied_volatility(treasury['Close'])
 
@@ -118,6 +114,11 @@ def main():
         if st.button("Train ARIMA(1,1,1) and Forecast"):
             combined_df = st.session_state['combined_df']
             treasury = st.session_state['treasury']
+
+            # Ensure 'Date' is a column before extracting exog_df
+            if treasury.index.name in ['Date', 'date']:
+                treasury = treasury.reset_index()
+
             exog_df = treasury[['Date', 'ImpliedVol']].copy()
             exog_df.set_index('Date', inplace=True)
 
