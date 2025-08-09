@@ -77,6 +77,12 @@ def upload_to_supabase(df_inputs, df_forecast):
     except Exception as e:
         st.error(f"Failed to upload to Supabase: {e}")
 
+def get_last_friday():
+    today = datetime.utcnow().date()
+    offset = (today.weekday() - 4) % 7
+    last_friday = today - timedelta(days=offset)
+    return last_friday
+
 # --- Main ---
 def main():
     st.title("Interest Rate Forecasting Dashboard")
@@ -120,6 +126,14 @@ def main():
             treasury['Date'] = treasury.index
 
         treasury['ImpliedVol'] = calc_implied_volatility(treasury['Close'])
+
+        # === FIX: ensure treasury has a 'Date' column before creating exog_df ===
+        if 'Date' not in treasury.columns:
+            if treasury.index.name in ['date', 'Date'] or treasury.index.name is not None:
+                treasury = treasury.reset_index()
+            else:
+                treasury['Date'] = treasury.index
+
         st.subheader("Treasury Yield & Implied Volatility")
         st.line_chart(treasury.set_index('Date')[['Close', 'ImpliedVol']])
 
@@ -163,14 +177,6 @@ def main():
     if st.session_state.get('input_data') is not None and st.session_state.get('forecast_data') is not None:
         if st.button("Upload data & forecast to Supabase"):
             upload_to_supabase(st.session_state['input_data'], st.session_state['forecast_data'])
-
-
-def get_last_friday():
-    today = datetime.utcnow().date()
-    offset = (today.weekday() - 4) % 7
-    last_friday = today - timedelta(days=offset)
-    return last_friday
-
 
 if __name__ == "__main__":
     main()
