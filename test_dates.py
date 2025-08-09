@@ -18,7 +18,7 @@ from yahooquery import Ticker
 # Config
 # ----------------------------
 st.set_page_config(page_title="Combined Rate (35th pct) Strategy Dashboard", layout="wide")
-FRED_API_KEY = os.getenv("FRED_API_KEY", "")
+FRED_API_KEY = "91bb2c5920fb8f843abdbbfdfcab5345"
 CACHE_DIR = "./data_cache"
 os.makedirs(CACHE_DIR, exist_ok=True)
 
