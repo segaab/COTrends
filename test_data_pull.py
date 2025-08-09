@@ -1,19 +1,20 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta
 from yahooquery import Ticker
 import statsmodels.api as sm
 from fredapi import Fred
 
-# Constants
+# Constants and API Keys
+FRED_API_KEY = "91bb2c5920fb8f843abdbbfdfcab5345"
 FED_FUNDS_SYMBOL = "ZQ=F"
 TREASURY_SYMBOL = "^TNX"
 FORECAST_DAYS = 7
 
-# Hardcoded FRED API Key (use with caution)
-FRED_API_KEY = "91bb2c5920fb8f843abdbbfdfcab5345"
+# Initialize Fred API client
 fred = Fred(api_key=FRED_API_KEY)
+
+# --- Data Fetching Functions ---
 
 @st.cache_data(show_spinner=False)
 def fetch_sofr_from_fred(start_date, end_date):
@@ -31,6 +32,7 @@ def fetch_yahoo_data(symbol, start_date, end_date):
         st.error(f"No data for {symbol}")
         return None
     df = df.reset_index()
+    # Rename columns if needed
     if 'date' in df.columns:
         df.rename(columns={'date': 'Date'}, inplace=True)
     if 'close' in df.columns:
@@ -39,30 +41,50 @@ def fetch_yahoo_data(symbol, start_date, end_date):
     df['Date'] = pd.to_datetime(df['Date']).dt.date
     return df
 
+# --- Data Preparation ---
+
 def calc_implied_volatility(series):
     return series.rolling(window=20).std().fillna(method='bfill')
 
-def combined_interest_rate(sofr_df, fedfund_df):
-    fedfund_df = fedfund_df.copy()
-    fedfund_df['InterestRate'] = 100 - fedfund_df['Close']  # futures price to rate %
-    merged = pd.merge(sofr_df, fedfund_df[['Date', 'InterestRate']], on='Date')
-    merged['Combined'] = (merged['Close'] + merged['InterestRate']) / 2
-    return merged[['Date', 'Combined']]
+def prepare_data(sofr_df, fedfund_df, treasury_df):
+    # Combine SOFR and Fed Funds futures into a single rate
+    fedfund_copy = fedfund_df.copy()
+    fedfund_copy['InterestRate'] = 100 - fedfund_copy['Close']  # Convert futures price to rate %
+    combined_df = pd.merge(sofr_df, fedfund_copy[['Date', 'InterestRate']], on='Date')
+    combined_df['Combined'] = (combined_df['Close'] + combined_df['InterestRate']) / 2
+    
+    # Prepare Treasury data for exogenous variable
+    treasury_copy = treasury_df.copy()
+    if treasury_copy.index.name in ['Date', 'date']:
+        treasury_copy.reset_index(inplace=True)
+    if 'Date' not in treasury_copy.columns:
+        treasury_copy['Date'] = treasury_copy.index
+    treasury_copy['Date'] = pd.to_datetime(treasury_copy['Date']).dt.date
+    treasury_copy['ImpliedVol'] = calc_implied_volatility(treasury_copy['Close'])
+    
+    exog_df = treasury_copy[['Date', 'ImpliedVol']].copy()
+    
+    return combined_df[['Date', 'Combined']], exog_df
 
-def train_arima(data_df, exog_df):
-    data_df = data_df.set_index('Date')
+# --- Modeling Functions ---
+
+def train_arima_model(target_df, exog_df):
+    target_df = target_df.set_index('Date')
     exog_df = exog_df.set_index('Date')
-    combined = pd.concat([data_df, exog_df], axis=1).dropna()
-    model = sm.tsa.ARIMA(combined['Combined'], exog=combined[exog_df.columns], order=(1,1,1))
+    combined = pd.concat([target_df, exog_df], axis=1).dropna()
+    model = sm.tsa.ARIMA(combined['Combined'], exog=combined[['ImpliedVol']], order=(1,1,1))
     model_fit = model.fit()
     return model_fit
 
-def forecast_arima(model_fit, exog_forecast, steps=FORECAST_DAYS):
+def forecast_arima_model(model_fit, exog_forecast):
+    steps = len(exog_forecast)
     forecast_res = model_fit.get_forecast(steps=steps, exog=exog_forecast)
     forecast_df = forecast_res.summary_frame()
     forecast_df['Date'] = pd.date_range(start=exog_forecast.index[0], periods=steps)
     forecast_df.set_index('Date', inplace=True)
     return forecast_df
+
+# --- Helper Functions ---
 
 def get_last_friday():
     today = datetime.utcnow().date()
@@ -70,77 +92,74 @@ def get_last_friday():
     last_friday = today - timedelta(days=offset)
     return last_friday
 
+# --- Streamlit App ---
+
 def main():
-    st.title("Interest Rate Forecasting Dashboard with FRED SOFR")
+    st.title("Interest Rate Forecasting Dashboard with ARIMA")
 
     last_friday = get_last_friday()
     start_date = last_friday - timedelta(days=365)
 
-    st.write(f"Fetching data from **{start_date}** to **{last_friday}**")
+    st.write(f"### Data range: {start_date} to {last_friday}")
 
+    # Step 1: Fetch data
     if st.button("Fetch Data"):
-        with st.spinner("Fetching SOFR (FRED), Fed Funds, Treasury data..."):
+        with st.spinner("Fetching SOFR, Fed Funds Futures, Treasury data..."):
             sofr = fetch_sofr_from_fred(start_date, last_friday)
             fedfund = fetch_yahoo_data(FED_FUNDS_SYMBOL, start_date, last_friday)
             treasury = fetch_yahoo_data(TREASURY_SYMBOL, start_date, last_friday)
+
             if sofr is None or fedfund is None or treasury is None:
+                st.error("Failed to fetch all required data. Please try again.")
                 st.stop()
+
             st.session_state['sofr'] = sofr
             st.session_state['fedfund'] = fedfund
             st.session_state['treasury'] = treasury
+            st.success("Data fetched successfully!")
 
-    if 'sofr' in st.session_state and 'fedfund' in st.session_state and 'treasury' in st.session_state:
+    # Step 2: Prepare and show data
+    if all(k in st.session_state for k in ['sofr', 'fedfund', 'treasury']):
         sofr = st.session_state['sofr']
         fedfund = st.session_state['fedfund']
         treasury = st.session_state['treasury']
 
-        combined_df = combined_interest_rate(sofr, fedfund)
+        combined_df, exog_df = prepare_data(sofr, fedfund, treasury)
+
+        st.session_state['combined_df'] = combined_df
+        st.session_state['exog_df'] = exog_df
+
         st.subheader("Combined Interest Rate (SOFR & Fed Funds Futures)")
         st.line_chart(combined_df.set_index('Date')['Combined'])
 
-        # Make sure treasury has 'Date' column as a column
-        if treasury.index.name in ['Date', 'date']:
-            treasury = treasury.reset_index()
-
-        treasury['ImpliedVol'] = calc_implied_volatility(treasury['Close'])
-
         st.subheader("Treasury Yield & Implied Volatility")
-        st.line_chart(treasury.set_index('Date')[['Close', 'ImpliedVol']])
+        treasury_vol = exog_df.set_index('Date')
+        st.line_chart(treasury_vol)
 
-        st.session_state['combined_df'] = combined_df
-        st.session_state['treasury'] = treasury
+    # Step 3: Train model
+    if 'combined_df' in st.session_state and 'exog_df' in st.session_state:
+        if st.button("Train ARIMA Model"):
+            with st.spinner("Training ARIMA(1,1,1) with exogenous variable..."):
+                model_fit = train_arima_model(st.session_state['combined_df'], st.session_state['exog_df'])
+                st.session_state['model_fit'] = model_fit
+            st.success("Model training complete!")
 
-    if st.session_state.get('combined_df') is not None and st.session_state.get('treasury') is not None:
-        if st.button("Train ARIMA(1,1,1) and Forecast"):
-            combined_df = st.session_state['combined_df']
+    # Step 4: Forecast
+    if 'model_fit' in st.session_state and 'exog_df' in st.session_state:
+        if st.button("Generate Forecast"):
+            exog_df = st.session_state['exog_df']
+            last_date = exog_df['Date'].max()
+            last_vol = exog_df.set_index('Date').iloc[-1]['ImpliedVol']
+            forecast_start_date = last_date + timedelta(days=1)
+            forecast_index = pd.date_range(start=forecast_start_date, periods=FORECAST_DAYS)
 
-            # Critical fix: fresh copy + reset index to ensure 'Date' is a column
-            treasury = st.session_state['treasury'].copy()
-            treasury = treasury.reset_index(drop=False)  # keep original index as column if unnamed
+            exog_forecast = pd.DataFrame({'ImpliedVol': [last_vol]*FORECAST_DAYS}, index=forecast_index)
 
-            if 'Date' not in treasury.columns:
-                treasury['Date'] = treasury.index
-
-            if pd.api.types.is_datetime64_any_dtype(treasury['Date']):
-                treasury['Date'] = pd.to_datetime(treasury['Date']).dt.date
-
-            exog_df = treasury[['Date', 'ImpliedVol']].copy()
-            exog_df.set_index('Date', inplace=True)
-
-            with st.spinner("Training ARIMA model..."):
-                model_fit = train_arima(combined_df, exog_df)
-
-            last_date = exog_df.index.max()
-            forecast_start = last_date + timedelta(days=1)
-            last_vol = exog_df.iloc[-1]['ImpliedVol']
-            exog_forecast = pd.DataFrame({'ImpliedVol': [last_vol]*FORECAST_DAYS},
-                                        index=pd.date_range(start=forecast_start, periods=FORECAST_DAYS))
-
-            forecast_df = forecast_arima(model_fit, exog_forecast, steps=FORECAST_DAYS)
+            with st.spinner("Generating forecast..."):
+                forecast_df = forecast_arima_model(st.session_state['model_fit'], exog_forecast)
 
             st.subheader(f"{FORECAST_DAYS}-Day Ahead Forecast")
             st.line_chart(forecast_df['mean'])
-
             st.dataframe(forecast_df[['mean', 'mean_ci_lower', 'mean_ci_upper']])
 
 if __name__ == "__main__":
