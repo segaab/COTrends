@@ -1,24 +1,16 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from yahooquery import Ticker
 from datetime import datetime, timedelta
-import pmdarima as pm
-from supabase import create_client, Client
+from yahooquery import Ticker
+import statsmodels.api as sm
 
-# --- Supabase configuration (hardcoded) ---
-SUPABASE_URL = "https://dzddytphimhoxeccxqsw.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR6ZGR5dHBoaW1ob3hlY2N4cXN3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1MTM2Njc5NCwiZXhwIjoyMDY2OTQyNzk0fQ.ng0ST7-V-cDBD0Jc80_0DFWXylzE-gte2I9MCX7qb0Q"
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# --- Constants ---
+# Constants
 FED_FUNDS_SYMBOL = "ZQ=F"
 SOFR_SYMBOL = "SOFR"
-TREASURY_SYMBOL = "^TNX"  # 10-year Treasury yield index
+TREASURY_SYMBOL = "^TNX"
 FORECAST_DAYS = 7
 
-# --- Helper functions ---
 @st.cache_data(show_spinner=False)
 def fetch_yahoo_data(symbol, start_date, end_date):
     t = Ticker(symbol)
@@ -27,7 +19,6 @@ def fetch_yahoo_data(symbol, start_date, end_date):
         st.error(f"No data for {symbol}")
         return None
     df = df.reset_index()
-    # Rename columns for consistency
     if 'date' in df.columns:
         df.rename(columns={'date': 'Date'}, inplace=True)
     if 'close' in df.columns:
@@ -36,61 +27,30 @@ def fetch_yahoo_data(symbol, start_date, end_date):
     df['Date'] = pd.to_datetime(df['Date']).dt.date
     return df
 
-def calc_implied_volatility(yield_series):
-    return yield_series.rolling(window=20).std().fillna(method='bfill')
+def calc_implied_volatility(series):
+    return series.rolling(window=20).std().fillna(method='bfill')
 
 def combined_interest_rate(sofr_df, fedfund_df):
     fedfund_df = fedfund_df.copy()
-    fedfund_df['InterestRate'] = 100 - fedfund_df['Close']  # Convert futures price to rate %
+    fedfund_df['InterestRate'] = 100 - fedfund_df['Close']  # futures price to rate %
     merged = pd.merge(sofr_df, fedfund_df[['Date', 'InterestRate']], on='Date')
     merged['Combined'] = (merged['Close'] + merged['InterestRate']) / 2
     return merged[['Date', 'Combined']]
 
-def train_arima_auto(data_df, exog_df):
-    # Align indexes
+def train_arima(data_df, exog_df):
     data_df = data_df.set_index('Date')
     exog_df = exog_df.set_index('Date')
-
-    # Combine and drop NA
     combined = pd.concat([data_df, exog_df], axis=1).dropna()
+    model = sm.tsa.ARIMA(combined['Combined'], exog=combined[exog_df.columns], order=(1,1,1))
+    model_fit = model.fit()
+    return model_fit
 
-    model = pm.auto_arima(
-        combined['Combined'],
-        exogenous=combined[exog_df.columns],
-        order=(1, 1, 1),
-        seasonal=False,
-        stepwise=True,
-        suppress_warnings=True,
-        error_action='ignore',
-        trace=False
-    )
-    return model
-
-def forecast_arima(model, exog_forecast, steps=FORECAST_DAYS):
-    preds = model.predict(n_periods=steps, exogenous=exog_forecast)
-    forecast_index = pd.date_range(start=exog_forecast.index[0], periods=steps, freq='D')
-    forecast_df = pd.DataFrame(preds, index=forecast_index, columns=['Forecast'])
+def forecast_arima(model_fit, exog_forecast, steps=FORECAST_DAYS):
+    forecast_res = model_fit.get_forecast(steps=steps, exog=exog_forecast)
+    forecast_df = forecast_res.summary_frame()
+    forecast_df['Date'] = pd.date_range(start=exog_forecast.index[0], periods=steps)
+    forecast_df.set_index('Date', inplace=True)
     return forecast_df
-
-def upload_to_supabase(df_inputs, df_forecast):
-    try:
-        input_records = df_inputs.to_dict(orient='records')
-        for rec in input_records:
-            rec['is_forecast'] = False
-        res1 = supabase.table('interest_rate_forecasts').insert(input_records).execute()
-
-        forecast_records = df_forecast.reset_index().to_dict(orient='records')
-        for rec in forecast_records:
-            rec['is_forecast'] = True
-            if isinstance(rec['index'], pd.Timestamp):
-                rec['Date'] = rec.pop('index').date()
-            else:
-                rec['Date'] = rec.pop('index')
-        res2 = supabase.table('interest_rate_forecasts').insert(forecast_records).execute()
-
-        st.success("Uploaded forecast and input data to Supabase")
-    except Exception as e:
-        st.error(f"Failed to upload to Supabase: {e}")
 
 def get_last_friday():
     today = datetime.utcnow().date()
@@ -98,31 +58,26 @@ def get_last_friday():
     last_friday = today - timedelta(days=offset)
     return last_friday
 
-# --- Main ---
 def main():
     st.title("Interest Rate Forecasting Dashboard")
 
     last_friday = get_last_friday()
     start_date = last_friday - timedelta(days=365)
 
-    st.info(f"Data range: {start_date} to {last_friday}")
+    st.write(f"Fetching data from **{start_date}** to **{last_friday}**")
 
-    # Step 1: Fetch Data Button
+    # Fetch data on button click
     if st.button("Fetch Data"):
-        with st.spinner("Fetching data..."):
+        with st.spinner("Fetching SOFR, Fed Funds, Treasury data..."):
             sofr = fetch_yahoo_data(SOFR_SYMBOL, start_date, last_friday)
             fedfund = fetch_yahoo_data(FED_FUNDS_SYMBOL, start_date, last_friday)
             treasury = fetch_yahoo_data(TREASURY_SYMBOL, start_date, last_friday)
+            if sofr is None or fedfund is None or treasury is None:
+                st.stop()
+            st.session_state['sofr'] = sofr
+            st.session_state['fedfund'] = fedfund
+            st.session_state['treasury'] = treasury
 
-        if sofr is None or fedfund is None or treasury is None:
-            st.error("Failed to fetch one or more datasets.")
-            st.stop()
-
-        st.session_state['sofr'] = sofr
-        st.session_state['fedfund'] = fedfund
-        st.session_state['treasury'] = treasury
-
-    # Display fetched data if available
     if 'sofr' in st.session_state and 'fedfund' in st.session_state and 'treasury' in st.session_state:
         sofr = st.session_state['sofr']
         fedfund = st.session_state['fedfund']
@@ -132,7 +87,7 @@ def main():
         st.subheader("Combined Interest Rate (SOFR & Fed Funds Futures)")
         st.line_chart(combined_df.set_index('Date')['Combined'])
 
-        # Normalize treasury date column
+        # Prepare treasury exogenous variable
         if 'date' in treasury.columns:
             treasury.rename(columns={'date': 'Date'}, inplace=True)
         elif treasury.index.name in ['date', 'Date']:
@@ -142,52 +97,36 @@ def main():
 
         treasury['ImpliedVol'] = calc_implied_volatility(treasury['Close'])
 
-        # === FIX: ensure treasury has a 'Date' column before creating exog_df ===
-        if 'Date' not in treasury.columns:
-            if treasury.index.name in ['date', 'Date'] or treasury.index.name is not None:
-                treasury = treasury.reset_index()
-            else:
-                treasury['Date'] = treasury.index
-
         st.subheader("Treasury Yield & Implied Volatility")
         st.line_chart(treasury.set_index('Date')[['Close', 'ImpliedVol']])
 
         st.session_state['combined_df'] = combined_df
         st.session_state['treasury'] = treasury
 
-    # Step 2: Train ARIMA & Forecast Button
+    # Train and Forecast button
     if st.session_state.get('combined_df') is not None and st.session_state.get('treasury') is not None:
-        if st.button("Train ARIMA(1,1,1) with exogenous implied volatility and Forecast"):
+        if st.button("Train ARIMA(1,1,1) and Forecast"):
             combined_df = st.session_state['combined_df']
             treasury = st.session_state['treasury']
-
             exog_df = treasury[['Date', 'ImpliedVol']].copy()
-            exog_df = exog_df.set_index('Date')
+            exog_df.set_index('Date', inplace=True)
 
-            with st.spinner("Training model..."):
-                model = train_arima_auto(combined_df, exog_df)
+            with st.spinner("Training ARIMA model..."):
+                model_fit = train_arima(combined_df, exog_df)
 
-            last_friday = get_last_friday()
-            last_vol = exog_df['ImpliedVol'][-1]
-            forecast_index = pd.date_range(start=last_friday + timedelta(days=1), periods=FORECAST_DAYS)
-            exog_forecast = pd.DataFrame({'ImpliedVol': [last_vol]*FORECAST_DAYS}, index=forecast_index)
+            last_date = exog_df.index.max()
+            forecast_start = last_date + timedelta(days=1)
+            last_vol = exog_df.iloc[-1]['ImpliedVol']
+            exog_forecast = pd.DataFrame({'ImpliedVol': [last_vol]*FORECAST_DAYS},
+                                        index=pd.date_range(start=forecast_start, periods=FORECAST_DAYS))
 
-            forecast_df = forecast_arima(model, exog_forecast, steps=FORECAST_DAYS)
+            forecast_df = forecast_arima(model_fit, exog_forecast, steps=FORECAST_DAYS)
 
             st.subheader(f"{FORECAST_DAYS}-Day Ahead Forecast")
-            st.line_chart(forecast_df['Forecast'])
+            st.line_chart(forecast_df['mean'])
 
-            # Save results for upload
-            input_data = combined_df.set_index('Date').assign(ImpliedVol=exog_df['ImpliedVol']).reset_index()
-
-            st.session_state['input_data'] = input_data
-            st.session_state['forecast_data'] = forecast_df
-
-    # Upload Button
-    if st.session_state.get('input_data') is not None and st.session_state.get('forecast_data') is not None:
-        if st.button("Upload data & forecast to Supabase"):
-            upload_to_supabase(st.session_state['input_data'], st.session_state['forecast_data'])
-
+            # Show forecast table
+            st.dataframe(forecast_df[['mean', 'mean_ci_lower', 'mean_ci_upper']])
 
 if __name__ == "__main__":
     main()
