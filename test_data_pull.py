@@ -1,155 +1,126 @@
-import os
-import time
-from datetime import datetime, timedelta
-from sodapy import Socrata
+import streamlit as st
 import pandas as pd
+import requests
+from supabase import create_client, Client
+import os
+from datetime import datetime, timedelta
 
-def init_client():
-    """Initialize and test the Socrata client"""
-    try:
-        MyAppToken = os.getenv('SODAPY_TOKEN')
-        if not MyAppToken:
-            print("Error: SODAPY_TOKEN not found in environment variables")
-            return None
-        
-        print("Initializing Socrata client...")
-        client = Socrata("publicreporting.cftc.gov", MyAppToken, timeout=30)
-        
-        # Test connection
-        print("Testing API connection...")
-        test_result = client.get("6dca-aqww", limit=1)
-        if not test_result:
-            print("Error: Failed to connect to CFTC API")
-            return None
-            
-        print("API connection successful!")
-        return client
-    except Exception as e:
-        print(f"Error initializing client: {str(e)}")
+# Environment variables or replace here:
+SUPABASE_URL = "https://dzddytphimhoxeccxqsw.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR6ZGR5dHBoaW1ob3hlY2N4cXN3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1MTM2Njc5NCwiZXh"
+FUNCTION_TRIGGER_URL = "https://dzddytphimhoxeccxqsw.supabase.co/functions/v1/treasury-rates-forecast"
+FUNCTION_SECRET = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR6ZGR5dHBoaW1ob3hlY2N4cXN3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1MTM2Njc5NCwiZXhwIjoyMDY2OTQyNzk0fQ.ng0ST7-V-cDBD0Jc80_0DFWXylzE-gte2I9MCX7qb0Q"
+
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+st.set_page_config(page_title="Treasury Rates Forecast Dashboard", layout="wide")
+
+st.title("Treasury Rates Forecast Dashboard")
+
+@st.cache_data(ttl=300)
+def get_latest_weekly_data():
+    query = (
+        supabase
+        .from_("hourly_forecasts")
+        .select("*")
+        .order("forecast_generated_at", desc=True)
+        .limit(1)
+        .single()
+    )
+    latest_run = query.execute()
+    if latest_run.error or not latest_run.data:
+        st.error("Failed to fetch latest forecast run metadata")
         return None
 
-def get_last_two_reports(client):
-    """Test function to fetch and log the last two reports"""
-    if not client:
-        print("Error: No Socrata client available")
-        return []
-        
+    forecast_generated_at = latest_run.data["forecast_generated_at"]
+    if not forecast_generated_at:
+        st.warning("No forecast generated yet")
+        return None
+
+    data_response = (
+        supabase
+        .from_("hourly_forecasts")
+        .select("*")
+        .eq("forecast_generated_at", forecast_generated_at)
+        .order("forecast_time", asc=True)
+    ).execute()
+
+    if data_response.error or not data_response.data:
+        st.error("Failed to fetch forecast data")
+        return None
+
+    df = pd.DataFrame(data_response.data)
+    df["forecast_time"] = pd.to_datetime(df["forecast_time"])
+    return df
+
+def plot_forecast(df: pd.DataFrame):
+    import altair as alt
+
+    df_actual = df[df["is_forecast"] == False]
+    df_forecast = df[df["is_forecast"] == True]
+
+    base = alt.Chart(df).encode(x="forecast_time:T")
+
+    line_actual = base.mark_line(color="blue").encode(
+        y=alt.Y("combined_rate:Q", title="Combined Interest Rate"),
+        tooltip=["forecast_time:T", "combined_rate:Q"],
+    ).transform_filter(alt.datum.is_forecast == False)
+
+    line_forecast = base.mark_line(color="orange", strokeDash=[5,5]).encode(
+        y="combined_rate:Q",
+        tooltip=["forecast_time:T", "combined_rate:Q"],
+    ).transform_filter(alt.datum.is_forecast == True)
+
+    band = alt.Chart(df_forecast).mark_area(color="orange", opacity=0.2).encode(
+        x="forecast_time:T",
+        y="forecast_lower_95:Q",
+        y2="forecast_upper_95:Q",
+    )
+
+    chart = (line_actual + line_forecast + band).properties(
+        width=900,
+        height=400,
+        title="Combined Rate: Actual (Blue) and Forecast (Orange)"
+    ).interactive()
+
+    st.altair_chart(chart, use_container_width=True)
+
+def trigger_edge_function():
+    headers = {
+        "Authorization": f"Bearer {FUNCTION_SECRET}",
+        "Content-Type": "application/json",
+    }
     try:
-        start_time = time.time()
-        print("\nStarting data fetch...")
-        
-        edt_now = datetime.utcnow() - timedelta(hours=4)
-        
-        # Find the most recent Friday (going backwards)
-        days_since_friday = (edt_now.weekday() - 4) % 7
-        last_friday = edt_now - timedelta(days=days_since_friday)
-        
-        # If it's Friday but before 3:30 PM EDT, use the previous Friday
-        if edt_now.weekday() == 4:
-            current_time = edt_now.time()
-            cutoff_time = datetime.strptime("15:30", "%H:%M").time()
-            if current_time < cutoff_time:
-                last_friday = last_friday - timedelta(weeks=1)
-        
-        # Go back one more Friday if we're on a weekend
-        if edt_now.weekday() >= 5:
-            last_friday = last_friday - timedelta(weeks=1)
-        
-        # The report is for the previous Tuesday
-        latest_tuesday = last_friday - timedelta(days=3)
-        previous_tuesday = latest_tuesday - timedelta(weeks=1)
-        
-        # Format dates as strings
-        latest_tuesday_str = latest_tuesday.strftime('%Y-%m-%d')
-        previous_tuesday_str = previous_tuesday.strftime('%Y-%m-%d')
-        
-        print(f"Fetching data for dates: {latest_tuesday_str} and {previous_tuesday_str}")
-
-        # Define required fields
-        required_fields = [
-            "market_and_exchange_names",
-            "report_date_as_yyyy_mm_dd",
-            "noncomm_positions_long_all",
-            "noncomm_positions_short_all",
-            "comm_positions_long_all",
-            "comm_positions_short_all",
-            "nonrept_positions_long_all",
-            "nonrept_positions_short_all"
-        ]
-
-        # Build the select query
-        select_query = ",".join(required_fields)
-        
-        print("\nFetching latest report...")
-        latest_result = client.get(
-            "6dca-aqww",
-            where=f"report_date_as_yyyy_mm_dd = '{latest_tuesday_str}'",
-            select=select_query,
-            limit=1000
-        )
-        print(f"Latest report fetched: {len(latest_result) if latest_result else 0} records")
-        
-        print("\nFetching previous report...")
-        previous_result = client.get(
-            "6dca-aqww",
-            where=f"report_date_as_yyyy_mm_dd = '{previous_tuesday_str}'",
-            select=select_query,
-            limit=1000
-        )
-        print(f"Previous report fetched: {len(previous_result) if previous_result else 0} records")
-        
-        # Combine results
-        results = []
-        if latest_result:
-            results.extend(latest_result)
-        if previous_result:
-            results.extend(previous_result)
-            
-        # Log sample data
-        if results:
-            print("\nSample data from first record:")
-            sample = results[0]
-            for field in required_fields:
-                print(f"{field}: {sample.get(field, 'N/A')}")
-            
-            # Check for specific assets
-            test_assets = [
-                "BITCOIN - CHICAGO MERCANTILE EXCHANGE",
-                "ETHER - CHICAGO MERCANTILE EXCHANGE",
-                "MICRO BITCOIN - CHICAGO MERCANTILE EXCHANGE",
-                "MICRO ETHER - CHICAGO MERCANTILE EXCHANGE",
-                "JAPANESE YEN - CHICAGO MERCANTILE EXCHANGE"
-            ]
-            
-            print("\nChecking for specific assets:")
-            for asset in test_assets:
-                asset_data = [r for r in results if r["market_and_exchange_names"] == asset]
-                print(f"{asset}: {len(asset_data)} records found")
-                if asset_data:
-                    print(f"Sample data for {asset}:")
-                    for field in required_fields:
-                        print(f"{field}: {asset_data[0].get(field, 'N/A')}")
-        
-        end_time = time.time()
-        print(f"\nTotal execution time: {end_time - start_time:.2f} seconds")
-        
-        return results
-            
+        response = requests.post(FUNCTION_TRIGGER_URL, headers=headers, json={})
+        if response.status_code == 200:
+            st.success("Edge function triggered successfully!")
+        else:
+            st.error(f"Failed to trigger function. Status code: {response.status_code}")
     except Exception as e:
-        print(f"Error in data fetching: {str(e)}")
-        return []
+        st.error(f"Error triggering function: {e}")
 
 def main():
-    print("Starting CFTC API Test...")
-    client = init_client()
-    if client:
-        data = get_last_two_reports(client)
-        if data:
-            print(f"\nTotal records fetched: {len(data)}")
-        else:
-            print("\nNo data was fetched")
+    st.markdown(
+        """
+        This dashboard displays the latest combined interest rate forecast from Supabase.
+        Use the buttons below to refresh data or trigger the forecast update job.
+        """
+    )
+
+    df = get_latest_weekly_data()
+    if df is not None and not df.empty:
+        plot_forecast(df)
     else:
-        print("\nTest failed: Could not initialize client")
+        st.warning("No data available to display.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Trigger Forecast Update"):
+            with st.spinner("Triggering edge function..."):
+                trigger_edge_function()
+    with col2:
+        if st.button("Refresh Data"):
+            st.experimental_rerun()
 
 if __name__ == "__main__":
-    main() 
+    main()
