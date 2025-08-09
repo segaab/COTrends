@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from yahooquery import Ticker
 from datetime import datetime, timedelta
-import statsmodels.api as sm
+import pmdarima as pm
 from supabase import create_client, Client
 
 # --- Supabase configuration (hardcoded) ---
@@ -46,18 +46,30 @@ def combined_interest_rate(sofr_df, fedfund_df):
     merged['Combined'] = (merged['Close'] + merged['InterestRate']) / 2
     return merged[['Date', 'Combined']]
 
-def train_arima_with_exog(data_df, exog_df):
+def train_arima_auto(data_df, exog_df):
+    # Align indexes
     data_df = data_df.set_index('Date')
     exog_df = exog_df.set_index('Date')
-    combined = pd.concat([data_df, exog_df], axis=1).dropna()
-    model = sm.tsa.ARIMA(combined['Combined'], exog=combined[exog_df.columns], order=(1,1,1))
-    model_fit = model.fit()
-    return model_fit
 
-def forecast(model_fit, exog_forecast, steps=FORECAST_DAYS):
-    forecast_res = model_fit.get_forecast(steps=steps, exog=exog_forecast)
-    forecast_df = forecast_res.summary_frame()
-    forecast_df['Date'] = pd.date_range(start=exog_forecast.index[0], periods=steps)
+    # Combine and drop NA
+    combined = pd.concat([data_df, exog_df], axis=1).dropna()
+
+    model = pm.auto_arima(
+        combined['Combined'],
+        exogenous=combined[exog_df.columns],
+        order=(1, 1, 1),
+        seasonal=False,
+        stepwise=True,
+        suppress_warnings=True,
+        error_action='ignore',
+        trace=False
+    )
+    return model
+
+def forecast_arima(model, exog_forecast, steps=FORECAST_DAYS):
+    preds = model.predict(n_periods=steps, exogenous=exog_forecast)
+    forecast_index = pd.date_range(start=exog_forecast.index[0], periods=steps, freq='D')
+    forecast_df = pd.DataFrame(preds, index=forecast_index, columns=['Forecast'])
     return forecast_df
 
 def upload_to_supabase(df_inputs, df_forecast):
@@ -67,10 +79,13 @@ def upload_to_supabase(df_inputs, df_forecast):
             rec['is_forecast'] = False
         res1 = supabase.table('interest_rate_forecasts').insert(input_records).execute()
 
-        forecast_records = df_forecast.to_dict(orient='records')
+        forecast_records = df_forecast.reset_index().to_dict(orient='records')
         for rec in forecast_records:
             rec['is_forecast'] = True
-            rec['Date'] = rec['Date'].date()
+            if isinstance(rec['index'], pd.Timestamp):
+                rec['Date'] = rec.pop('index').date()
+            else:
+                rec['Date'] = rec.pop('index')
         res2 = supabase.table('interest_rate_forecasts').insert(forecast_records).execute()
 
         st.success("Uploaded forecast and input data to Supabase")
@@ -150,33 +165,29 @@ def main():
             exog_df = exog_df.set_index('Date')
 
             with st.spinner("Training model..."):
-                model_fit = train_arima_with_exog(combined_df, exog_df)
+                model = train_arima_auto(combined_df, exog_df)
 
             last_friday = get_last_friday()
             last_vol = exog_df['ImpliedVol'][-1]
             forecast_index = pd.date_range(start=last_friday + timedelta(days=1), periods=FORECAST_DAYS)
             exog_forecast = pd.DataFrame({'ImpliedVol': [last_vol]*FORECAST_DAYS}, index=forecast_index)
 
-            forecast_df = forecast(model_fit, exog_forecast, steps=FORECAST_DAYS)
+            forecast_df = forecast_arima(model, exog_forecast, steps=FORECAST_DAYS)
 
             st.subheader(f"{FORECAST_DAYS}-Day Ahead Forecast")
-            st.line_chart(forecast_df.set_index('Date')['mean'])
+            st.line_chart(forecast_df['Forecast'])
 
             # Save results for upload
             input_data = combined_df.set_index('Date').assign(ImpliedVol=exog_df['ImpliedVol']).reset_index()
-            forecast_upload_df = forecast_df.rename(columns={
-                'mean': 'Forecast',
-                'mean_ci_lower': 'LowerCI',
-                'mean_ci_upper': 'UpperCI'
-            })[['Date', 'Forecast', 'LowerCI', 'UpperCI']]
 
             st.session_state['input_data'] = input_data
-            st.session_state['forecast_data'] = forecast_upload_df
+            st.session_state['forecast_data'] = forecast_df
 
     # Upload Button
     if st.session_state.get('input_data') is not None and st.session_state.get('forecast_data') is not None:
         if st.button("Upload data & forecast to Supabase"):
             upload_to_supabase(st.session_state['input_data'], st.session_state['forecast_data'])
+
 
 if __name__ == "__main__":
     main()
