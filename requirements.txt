@@ -28,5 +28,5 @@ scikit-learn
 statsmodels
 pip
 setuptools
-pmdarima
+
 
