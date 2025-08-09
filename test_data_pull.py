@@ -98,21 +98,9 @@ def main():
         st.subheader("Combined Interest Rate (SOFR & Fed Funds Futures)")
         st.line_chart(combined_df.set_index('Date')['Combined'])
 
-        # Debug prints before resetting index
-        st.write("=== Treasury DataFrame BEFORE reset_index ===")
-        st.write(f"Columns: {treasury.columns.tolist()}")
-        st.write(f"Index name: {treasury.index.name}")
-        st.write(treasury.head())
-
-        # Reset index if index is 'Date' or 'date'
+        # Make sure treasury has 'Date' column as a column
         if treasury.index.name in ['Date', 'date']:
             treasury = treasury.reset_index()
-
-        # Debug prints after resetting index
-        st.write("=== Treasury DataFrame AFTER reset_index ===")
-        st.write(f"Columns: {treasury.columns.tolist()}")
-        st.write(f"Index name: {treasury.index.name}")
-        st.write(treasury.head())
 
         treasury['ImpliedVol'] = calc_implied_volatility(treasury['Close'])
 
@@ -125,22 +113,16 @@ def main():
     if st.session_state.get('combined_df') is not None and st.session_state.get('treasury') is not None:
         if st.button("Train ARIMA(1,1,1) and Forecast"):
             combined_df = st.session_state['combined_df']
-            treasury = st.session_state['treasury']
 
-            # Debug prints before preparing exog_df
-            st.write("=== Treasury DataFrame BEFORE preparing exog_df ===")
-            st.write(f"Columns: {treasury.columns.tolist()}")
-            st.write(f"Index name: {treasury.index.name}")
-            st.write(treasury.head())
+            # Critical fix: fresh copy + reset index to ensure 'Date' is a column
+            treasury = st.session_state['treasury'].copy()
+            treasury = treasury.reset_index(drop=False)  # keep original index as column if unnamed
 
-            # Reset index if needed
-            if treasury.index.name in ['Date', 'date']:
-                treasury = treasury.reset_index()
-
-            # Check if 'Date' column exists
             if 'Date' not in treasury.columns:
-                st.error("Error: 'Date' column missing from treasury DataFrame!")
-                st.stop()
+                treasury['Date'] = treasury.index
+
+            if pd.api.types.is_datetime64_any_dtype(treasury['Date']):
+                treasury['Date'] = pd.to_datetime(treasury['Date']).dt.date
 
             exog_df = treasury[['Date', 'ImpliedVol']].copy()
             exog_df.set_index('Date', inplace=True)
