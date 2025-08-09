@@ -4,12 +4,24 @@ import numpy as np
 from datetime import datetime, timedelta
 from yahooquery import Ticker
 import statsmodels.api as sm
+from fredapi import Fred
 
 # Constants
 FED_FUNDS_SYMBOL = "ZQ=F"
-SOFR_SYMBOL = "SOFR"
 TREASURY_SYMBOL = "^TNX"
 FORECAST_DAYS = 7
+
+# Hardcoded FRED API Key (use with caution)
+FRED_API_KEY = "91bb2c5920fb8f843abdbbfdfcab5345"
+fred = Fred(api_key=FRED_API_KEY)
+
+@st.cache_data(show_spinner=False)
+def fetch_sofr_from_fred(start_date, end_date):
+    data = fred.get_series('SOFR', observation_start=start_date, observation_end=end_date)
+    df = data.reset_index()
+    df.columns = ['Date', 'Close']
+    df['Date'] = pd.to_datetime(df['Date']).dt.date
+    return df
 
 @st.cache_data(show_spinner=False)
 def fetch_yahoo_data(symbol, start_date, end_date):
@@ -59,17 +71,16 @@ def get_last_friday():
     return last_friday
 
 def main():
-    st.title("Interest Rate Forecasting Dashboard")
+    st.title("Interest Rate Forecasting Dashboard with FRED SOFR")
 
     last_friday = get_last_friday()
     start_date = last_friday - timedelta(days=365)
 
     st.write(f"Fetching data from **{start_date}** to **{last_friday}**")
 
-    # Fetch data on button click
     if st.button("Fetch Data"):
-        with st.spinner("Fetching SOFR, Fed Funds, Treasury data..."):
-            sofr = fetch_yahoo_data(SOFR_SYMBOL, start_date, last_friday)
+        with st.spinner("Fetching SOFR (FRED), Fed Funds, Treasury data..."):
+            sofr = fetch_sofr_from_fred(start_date, last_friday)
             fedfund = fetch_yahoo_data(FED_FUNDS_SYMBOL, start_date, last_friday)
             treasury = fetch_yahoo_data(TREASURY_SYMBOL, start_date, last_friday)
             if sofr is None or fedfund is None or treasury is None:
@@ -103,7 +114,6 @@ def main():
         st.session_state['combined_df'] = combined_df
         st.session_state['treasury'] = treasury
 
-    # Train and Forecast button
     if st.session_state.get('combined_df') is not None and st.session_state.get('treasury') is not None:
         if st.button("Train ARIMA(1,1,1) and Forecast"):
             combined_df = st.session_state['combined_df']
@@ -125,7 +135,6 @@ def main():
             st.subheader(f"{FORECAST_DAYS}-Day Ahead Forecast")
             st.line_chart(forecast_df['mean'])
 
-            # Show forecast table
             st.dataframe(forecast_df[['mean', 'mean_ci_lower', 'mean_ci_upper']])
 
 if __name__ == "__main__":
