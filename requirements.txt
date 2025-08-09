@@ -26,4 +26,4 @@ pandas
 fredapi
 scikit-learn
 statsmodels
-pmdarima
+pmdarima==1.6.1
