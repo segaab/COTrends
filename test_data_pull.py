@@ -2,16 +2,14 @@ import streamlit as st
 import pandas as pd
 import requests
 from supabase import create_client, Client
-import os
-from datetime import datetime, timedelta
 
-# Environment variables or replace here:
+# Hardcoded credentials
 SUPABASE_URL = "https://dzddytphimhoxeccxqsw.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR6ZGR5dHBoaW1ob3hlY2N4cXN3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1MTM2Njc5NCwiZXh"
+SUPABASE_SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR6ZGR5dHBoaW1ob3hlY2N4cXN3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1MTM2Njc5NCwiZXhwIjoyMDY2OTQyNzk0fQ.ng0ST7-V-cDBD0Jc80_0DFWXylzE-gte2I9MCX7qb0Q"
 FUNCTION_TRIGGER_URL = "https://dzddytphimhoxeccxqsw.supabase.co/functions/v1/treasury-rates-forecast"
-FUNCTION_SECRET = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImR6ZGR5dHBoaW1ob3hlY2N4cXN3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc1MTM2Njc5NCwiZXhwIjoyMDY2OTQyNzk0fQ.ng0ST7-V-cDBD0Jc80_0DFWXylzE-gte2I9MCX7qb0Q"
+FUNCTION_SECRET = SUPABASE_SERVICE_ROLE_KEY  # Assuming same key for Bearer token
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 st.set_page_config(page_title="Treasury Rates Forecast Dashboard", layout="wide")
 
@@ -22,19 +20,23 @@ def get_latest_weekly_data():
     query = (
         supabase
         .from_("hourly_forecasts")
-        .select("*")
+        .select("forecast_generated_at")
         .order("forecast_generated_at", desc=True)
         .limit(1)
-        .single()
     )
     latest_run = query.execute()
-    if latest_run.error or not latest_run.data:
-        st.error("Failed to fetch latest forecast run metadata")
+
+    if latest_run.error:
+        st.error(f"Error fetching latest forecast_generated_at: {latest_run.error.message}")
         return None
 
-    forecast_generated_at = latest_run.data["forecast_generated_at"]
+    if not latest_run.data or len(latest_run.data) == 0:
+        st.warning("No forecast runs found in the database.")
+        return None
+
+    forecast_generated_at = latest_run.data[0]["forecast_generated_at"]
     if not forecast_generated_at:
-        st.warning("No forecast generated yet")
+        st.warning("No forecast_generated_at value found.")
         return None
 
     data_response = (
@@ -45,8 +47,12 @@ def get_latest_weekly_data():
         .order("forecast_time", asc=True)
     ).execute()
 
-    if data_response.error or not data_response.data:
-        st.error("Failed to fetch forecast data")
+    if data_response.error:
+        st.error(f"Error fetching forecast data: {data_response.error.message}")
+        return None
+
+    if not data_response.data:
+        st.warning("No forecast data found for latest forecast_generated_at.")
         return None
 
     df = pd.DataFrame(data_response.data)
@@ -66,7 +72,7 @@ def plot_forecast(df: pd.DataFrame):
         tooltip=["forecast_time:T", "combined_rate:Q"],
     ).transform_filter(alt.datum.is_forecast == False)
 
-    line_forecast = base.mark_line(color="orange", strokeDash=[5,5]).encode(
+    line_forecast = base.mark_line(color="orange", strokeDash=[5, 5]).encode(
         y="combined_rate:Q",
         tooltip=["forecast_time:T", "combined_rate:Q"],
     ).transform_filter(alt.datum.is_forecast == True)
