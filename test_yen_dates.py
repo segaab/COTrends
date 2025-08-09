@@ -40,7 +40,13 @@ APP_TOKEN = "WSCaavlIcDgtLVZbJA1FKkq40"  # Replace with your app token or set en
 
 @st.cache_resource(show_spinner=False)
 def get_socrata_client():
-    return Socrata("publicreporting.cftc.gov", APP_TOKEN, timeout=TIMEOUT)
+    try:
+        client = Socrata("publicreporting.cftc.gov", APP_TOKEN, timeout=TIMEOUT)
+        st.info("Socrata client initialized.")
+        return client
+    except Exception as e:
+        st.error(f"Failed to initialize Socrata client: {e}")
+        return None
 
 # ==============================
 # DATA FETCHING
@@ -48,45 +54,62 @@ def get_socrata_client():
 @st.cache_data(ttl=60*60*6, show_spinner=True)
 def fetch_cot_data(market_name):
     client = get_socrata_client()
+    if client is None:
+        st.error("Cannot fetch COT data because Socrata client is unavailable.")
+        return pd.DataFrame()
+
     where_clause = f"market_and_exchange_name='{market_name}'"
     try:
         results = client.get("6dca-aqww", where=where_clause, order="report_date DESC", limit=1000)
+        if not results:
+            st.warning(f"No COT data returned for {market_name}.")
+            return pd.DataFrame()
+        df = pd.DataFrame.from_records(results)
+        df["report_date"] = pd.to_datetime(df["report_date"], errors="coerce")
+        if df["report_date"].isnull().all():
+            st.warning(f"All report dates are invalid in COT data for {market_name}.")
+        numeric_cols = [
+            "noncomm_positions_long_all", "noncomm_positions_short_all", "noncomm_positions_spread_all",
+            "comm_positions_long_all", "comm_positions_short_all",
+            "tot_rept_positions_long_all", "tot_rept_positions_short",
+            "nonrept_positions_long_all", "nonrept_positions_short_all",
+            "open_interest_all"
+        ]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        st.success(f"COT data fetched for {market_name}: {len(df)} rows.")
+        return df.sort_values("report_date")
+    except requests.exceptions.Timeout:
+        st.error(f"Timeout while fetching COT data for {market_name}.")
     except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching COT data: {e}")
-        return pd.DataFrame()
-
-    if not results:
-        return pd.DataFrame()
-    df = pd.DataFrame.from_records(results)
-    df["report_date"] = pd.to_datetime(df["report_date"])
-    numeric_cols = [
-        "noncomm_positions_long_all", "noncomm_positions_short_all", "noncomm_positions_spread_all",
-        "comm_positions_long_all", "comm_positions_short_all",
-        "tot_rept_positions_long_all", "tot_rept_positions_short",
-        "nonrept_positions_long_all", "nonrept_positions_short_all",
-        "open_interest_all"
-    ]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.sort_values("report_date")
+        st.error(f"Network error fetching COT data for {market_name}: {e}")
+    except Exception as e:
+        st.error(f"Unexpected error fetching COT data for {market_name}: {e}")
+    return pd.DataFrame()
 
 @st.cache_data(ttl=60*60*2, show_spinner=True)
 def fetch_yahoo_data(symbol, start_date, end_date):
+    st.info(f"Fetching Yahoo data for {symbol} from {start_date} to {end_date}...")
     try:
         ticker = Ticker(symbol, asynchronous=False, timeout=TIMEOUT)
         data = ticker.history(start=start_date, end=end_date)
         if data.empty:
-            st.warning(f"No Yahoo data for {symbol}.")
+            st.warning(f"No Yahoo data found for {symbol}.")
             return pd.DataFrame()
         data = data.reset_index()
-        data["date"] = pd.to_datetime(data["date"]).dt.date
-        # Ensure columns lowercase to unify
+        data["date"] = pd.to_datetime(data["date"], errors="coerce").dt.date
+        data = data.dropna(subset=["date", "close", "volume"])
         data.columns = [c.lower() for c in data.columns]
+        st.success(f"Yahoo data fetched for {symbol}: {len(data)} rows.")
         return data
+    except requests.exceptions.Timeout:
+        st.error(f"Timeout while fetching Yahoo data for {symbol}.")
     except requests.exceptions.RequestException as e:
-        st.error(f"Network error fetching Yahoo data: {e}")
-        return pd.DataFrame()
+        st.error(f"Network error fetching Yahoo data for {symbol}: {e}")
+    except Exception as e:
+        st.error(f"Unexpected error fetching Yahoo data for {symbol}: {e}")
+    return pd.DataFrame()
 
 # ==============================
 # DATA PROCESSING
@@ -294,6 +317,7 @@ if start_date >= end_date:
 
 if st.button("Refresh Data"):
     st.cache_data.clear()
+    st.experimental_rerun()
 
 cols = st.columns(len(COT_MARKETS))
 
@@ -302,4 +326,31 @@ for i, market in enumerate(COT_MARKETS):
         st.header(market)
         symbol = YAHOO_SYMBOLS.get(market)
         if not symbol:
-            st.error
+            st.error(f"No Yahoo symbol mapping for market: {market}")
+            continue
+
+        cot_df = fetch_cot_data(market)
+        yahoo_df = fetch_yahoo_data(symbol, start_date.isoformat(), end_date.isoformat())
+
+        if cot_df.empty:
+            st.warning(f"COT data unavailable for {market}")
+        if yahoo_df.empty:
+            st.warning(f"Yahoo data unavailable for {symbol}")
+
+        if cot_df.empty or yahoo_df.empty:
+            st.info("Skipping analysis due to missing data.")
+            continue
+
+        health, pv_score, cot_score, oi_score, points_df = compute_health(yahoo_df, cot_df)
+        st.metric("Market Health Score", f"{health}/5", delta=None)
+        st.write(f"Price & RVOL Spectrum Score: {pv_score:.2f}")
+        st.write(f"COT Score: {cot_score:.2f}")
+        st.write(f"Open Interest Score: {oi_score:.2f}")
+        st.write(f"Health Color: {health_color(health)}")
+
+        if not points_df.empty:
+            scenario_options = points_df.index.to_list()
+            selected_idx = st.selectbox("Select spectrum scenario point by index", scenario_options)
+            plot_points_with_next_day(yahoo_df, points_df, selected_idx)
+        else:
+            st.info("No scenario points to display.")
