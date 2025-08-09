@@ -45,8 +45,10 @@ def calc_implied_volatility(yield_series):
     return yield_series.rolling(window=20).std().fillna(method='bfill')
 
 def combined_interest_rate(sofr_df, fedfund_df):
-    merged = pd.merge(sofr_df, fedfund_df, on='Date', suffixes=('_SOFR', '_Fed'))
-    merged['Combined'] = (merged['Close_SOFR'] + merged['Close_Fed']) / 2
+    fedfund_df = fedfund_df.copy()
+    fedfund_df['InterestRate'] = 100 - fedfund_df['Close']  # Convert futures price to rate %
+    merged = pd.merge(sofr_df, fedfund_df[['Date', 'InterestRate']], on='Date')
+    merged['Combined'] = (merged['Close'] + merged['InterestRate']) / 2
     return merged[['Date', 'Combined']]
 
 def train_arima_with_exog(data_df, exog_df):
