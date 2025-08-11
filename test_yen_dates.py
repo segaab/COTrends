@@ -1,28 +1,22 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 import datetime
-import time
-import requests
+import logging
 from sodapy import Socrata
-from yahooquery import Ticker
 from sklearn.linear_model import LinearRegression
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import plotly.graph_objects as go
-from typing import Dict, Any, Optional, Tuple
+import yahooquery as yq
+import threading
 
-# -----------------------
-# CONFIG
-# -----------------------
-# Hardcoded Socrata App Token as requested
+# ----------------------------
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ----------------------------
+# Constants & Configurations
+
 APP_TOKEN = "PP3ezxaUTiGforvvbBUGzwRx7"
-
-TIMEOUT = 60  # network timeout seconds
-LOOKBACK_DAYS_SPECTRUM = 30  # ~6 weeks of trading days
-RVOL_PERCENTILE = 0.78
-UPTREND_PCT = 4.0   # +4% threshold (percent)
-DOWNTREND_PCT = -4.0  # -4% threshold (percent)
 
 WEIGHT_PV_RVOL = 0.40
 WEIGHT_COT = 0.35
@@ -30,463 +24,374 @@ WEIGHT_OI = 0.25
 COT_SHORT_TERM_WT = 0.40
 COT_LONG_TERM_WT = 0.60
 
-# -----------------------
-# ASSET MAPPING
-# display_name -> (COT_name, yahoo_ticker)
-# -----------------------
-ASSET_MAP = {
-    # base metals
-    "Gold": ("GOLD - COMMODITY EXCHANGE INC.", "GC=F"),
-    "Silver": ("SILVER - COMMODITY EXCHANGE INC.", "SI=F"),
+LOOKBACK_DAYS_SPECTRUM = 30  # approx 6 weeks trading days
 
-    # currency futures (display uses common name)
-    "AUD/USD": ("AUSTRALIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE", "AUDUSD=X"),
-    "GBP/USD": ("BRITISH POUND - CHICAGO MERCANTILE EXCHANGE", "GBPUSD=X"),
-    "USD/CAD": ("CANADIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE", "USDCAD=X"),
-    "EUR/USD": ("EURO FX - CHICAGO MERCANTILE EXCHANGE", "EURUSD=X"),
-    "EUR/GBP": ("EURO FX/BRITISH POUND XRATE - CHICAGO MERCANTILE EXCHANGE", "EURGBP=X"),
-    "JPY/USD": ("JAPANESE YEN - CHICAGO MERCANTILE EXCHANGE", "JPY=X"),
-    "CHF/USD": ("SWISS FRANC - CHICAGO MERCANTILE EXCHANGE", "CHF=X"),
+# ----------------------------
+# Assets with common display names (COT key -> display name)
 
-    # crypto proxies
-    "Bitcoin": ("BITCOIN - CHICAGO MERCANTILE EXCHANGE", "BTC-USD"),
-    "Micro Bitcoin": ("MICRO BITCOIN - CHICAGO MERCANTILE EXCHANGE", "BTC-USD"),
-    "Micro Ether": ("MICRO ETHER - CHICAGO MERCANTILE EXCHANGE", "ETH-USD"),
+ASSETS = {
+    "GOLD - COMMODITY EXCHANGE INC.": "Gold",
+    "SILVER - COMMODITY EXCHANGE INC.": "Silver",
 
-    # equity index futures / proxies
-    "E-Mini S&P Financial (ES)": ("E-MINI S&P FINANCIAL INDEX - CHICAGO MERCANTILE EXCHANGE", "ES=F"),
-    "DJ Real Estate (ETF proxy)": ("DOW JONES U.S. REAL ESTATE IDX - CHICAGO BOARD OF TRADE", "DJR"),
+    "AUSTRALIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE": "AUDUSD",
+    "BRITISH POUND - CHICAGO MERCANTILE EXCHANGE": "GBPUSD",
+    "CANADIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE": "USDCAD",
+    "EURO FX - CHICAGO MERCANTILE EXCHANGE": "EURUSD",
+    "EURO FX/BRITISH POUND XRATE - CHICAGO MERCANTILE EXCHANGE": "EURGBP",
+    "JAPANESE YEN - CHICAGO MERCANTILE EXCHANGE": "JPY",
+    "SWISS FRANC - CHICAGO MERCANTILE EXCHANGE": "CHF",
 
-    # energy & other metals
-    "WTI Crude": ("WTI CRUDE OIL FINANCIAL - NEW YORK MERCANTILE EXCHANGE", "CL=F"),
-    "Platinum": ("PLATINUM - NEW YORK MERCANTILE EXCHANGE", "PL=F"),
-    "Palladium": ("PALLADIUM - NEW YORK MERCANTILE EXCHANGE", "PA=F"),
-    "Copper": ("COPPER - COMMODITY EXCHANGE INC.", "HG=F"),
+    "BITCOIN - CHICAGO MERCANTILE EXCHANGE": "BTC-USD",
+    "MICRO BITCOIN - CHICAGO MERCANTILE EXCHANGE": "BTC-USD",
+    "MICRO ETHER - CHICAGO MERCANTILE EXCHANGE": "ETH-USD",
+
+    "E-MINI S&P FINANCIAL INDEX - CHICAGO MERCANTILE EXCHANGE": "ES=F",
+    "DOW JONES U.S. REAL ESTATE IDX - CHICAGO BOARD OF TRADE": "DJR",
+
+    "WTI CRUDE OIL FINANCIAL - NEW YORK MERCANTILE EXCHANGE": "CL=F",
+    "PLATINUM - NEW YORK MERCANTILE EXCHANGE": "PL=F",
+    "PALLADIUM - NEW YORK MERCANTILE EXCHANGE": "PA=F",
+    "COPPER - COMMODITY EXCHANGE INC.": "HG=F"
 }
 
-# -----------------------
-# Logging helper (writes to UI and console)
-# -----------------------
-def app_log(msg: str, level: str = "info"):
-    """Show message in Streamlit UI and print to console for logs"""
-    if level == "info":
-        st.info(msg)
-    elif level == "success":
-        st.success(msg)
-    elif level == "warning":
-        st.warning(msg)
-    elif level == "error":
-        st.error(msg)
-    else:
-        st.write(msg)
-    print(f"[{level.upper()}] {msg}")
+# Yahoo ticker symbols mapped from display names
+YAHOO_SYMBOLS = {
+    "Gold": "GC=F",
+    "Silver": "SI=F",
+    "AUDUSD": "AUDUSD=X",
+    "GBPUSD": "GBPUSD=X",
+    "USDCAD": "USDCAD=X",
+    "EURUSD": "EURUSD=X",
+    "EURGBP": "EURGBP=X",
+    "JPY": "JPY=X",
+    "CHF": "CHF=X",
+    "BTC-USD": "BTC-USD",
+    "ETH-USD": "ETH-USD",
+    "ES=F": "ES=F",
+    "DJR": "DJR",
+    "CL=F": "CL=F",
+    "PL=F": "PL=F",
+    "PA=F": "PA=F",
+    "HG=F": "HG=F"
+}
 
-# -----------------------
-# Socrata client & COT fetch
-# -----------------------
+# ----------------------------
+# Socrata client cached with timeout
+
 @st.cache_resource(show_spinner=False)
-def get_socrata_client() -> Optional[Socrata]:
-    try:
-        client = Socrata("publicreporting.cftc.gov", APP_TOKEN, timeout=TIMEOUT)
-        app_log("Socrata client initialized.", "info")
-        return client
-    except Exception as e:
-        app_log(f"Socrata client init failed: {e}", "error")
-        return None
+def get_socrata_client():
+    logger.info("Initializing Socrata client")
+    return Socrata("publicreporting.cftc.gov", APP_TOKEN, timeout=60)
+
+# ----------------------------
+# Fetch COT data function
 
 @st.cache_data(ttl=60*60*6, show_spinner=True)
-def fetch_cot_data_by_market(cot_market_name: str) -> pd.DataFrame:
+def fetch_cot_data(market_name):
     client = get_socrata_client()
-    if client is None:
-        return pd.DataFrame()
-    # correct column name is 'market_and_exchange_names'
-    where_clause = f"market_and_exchange_names='{cot_market_name}'"
+    where_clause = f"market_and_exchange_names='{market_name}'"
     try:
         results = client.get("6dca-aqww", where=where_clause, order="report_date DESC", limit=1000)
-    except requests.exceptions.Timeout:
-        app_log(f"COT fetch timeout for {cot_market_name}", "error")
-        return pd.DataFrame()
-    except requests.exceptions.HTTPError as e:
-        app_log(f"COT HTTP error for {cot_market_name}: {e}", "error")
-        return pd.DataFrame()
+        if not results:
+            logger.warning(f"No COT data returned for {market_name}")
+            return pd.DataFrame()
+        df = pd.DataFrame.from_records(results)
+        df["report_date"] = pd.to_datetime(df["report_date_as_yyyy_mm_dd"], errors='coerce')
+        cols = [
+            "noncomm_positions_long_all", "noncomm_positions_short_all",
+            "comm_positions_long_all", "comm_positions_short_all",
+            "open_interest_all"
+        ]
+        for col in cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df.sort_values("report_date")
     except Exception as e:
-        app_log(f"COT fetch unexpected error for {cot_market_name}: {e}", "error")
+        logger.error(f"Error fetching COT data for {market_name}: {e}")
         return pd.DataFrame()
 
-    if not results:
-        app_log(f"No COT rows returned for {cot_market_name}", "warning")
-        return pd.DataFrame()
+# ----------------------------
+# Fetch Yahoo Finance data function
 
-    df = pd.DataFrame.from_records(results)
-    df["report_date"] = pd.to_datetime(df.get("report_date", pd.Series()), errors="coerce")
-    # convert expected numeric columns if present
-    expected_cols = [
-        "noncomm_positions_long_all", "noncomm_positions_short_all", "noncomm_positions_spread_all",
-        "comm_positions_long_all", "comm_positions_short_all",
-        "tot_rept_positions_long_all", "tot_rept_positions_short",
-        "nonrept_positions_long_all", "nonrept_positions_short_all",
-        "open_interest_all"
-    ]
-    for col in expected_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-    app_log(f"Fetched COT for {cot_market_name}: {len(df)} rows", "success")
-    return df.sort_values("report_date")
-
-# -----------------------
-# Yahoo history fetch
-# -----------------------
 @st.cache_data(ttl=60*60*2, show_spinner=True)
-def fetch_yahoo_history(ticker: str, start_iso: str, end_iso: str) -> pd.DataFrame:
+def fetch_yahoo_data(symbol, start_date, end_date):
     try:
-        t = Ticker(ticker, asynchronous=False, timeout=TIMEOUT)
-        hist = t.history(start=start_iso, end=end_iso)
+        ticker = yq.Ticker(symbol)
+        data = ticker.history(start=start_date, end=end_date)
+        if data.empty:
+            logger.warning(f"No Yahoo data for symbol {symbol}")
+            return pd.DataFrame()
+        if isinstance(data.index, pd.MultiIndex):
+            data = data.reset_index()
+        else:
+            data = data.reset_index()
+        data.rename(columns={"date": "date", "close": "Close", "volume": "Volume", "openInterest": "OpenInterest"}, inplace=True)
+        data["date"] = pd.to_datetime(data["date"], errors='coerce')
+        return data[["date", "Close", "Volume", "OpenInterest"]].dropna(subset=["date"])
     except Exception as e:
-        app_log(f"Yahoo fetch error for {ticker}: {e}", "error")
+        logger.error(f"Error fetching Yahoo data for {symbol}: {e}")
         return pd.DataFrame()
 
-    if hist is None or hist.empty:
-        app_log(f"No yahoo data for {ticker}", "warning")
-        return pd.DataFrame()
+# ----------------------------
+# Calculate relative volume
 
-    hist = hist.reset_index()
-    hist.columns = [c.lower() for c in hist.columns]
-
-    # ensure date column exists and is tz-naive
-    if "date" not in hist.columns:
-        app_log(f"Yahoo data for {ticker} missing 'date' column", "error")
-        return pd.DataFrame()
-
-    hist["date"] = pd.to_datetime(hist["date"], errors="coerce")
-    # remove tz info if present
-    try:
-        if pd.api.types.is_datetime64tz_dtype(hist["date"]):
-            hist["date"] = hist["date"].dt.tz_convert(None).dt.tz_localize(None)
-    except Exception:
-        # fallback: force naive by astype
-        try:
-            hist["date"] = hist["date"].dt.tz_localize(None)
-        except Exception:
-            pass
-
-    hist["date"] = hist["date"].dt.date
-    # ensure required columns
-    if "close" not in hist.columns:
-        hist["close"] = np.nan
-    if "volume" not in hist.columns:
-        hist["volume"] = np.nan
-    # drop rows without close
-    hist = hist.dropna(subset=["close"]).reset_index(drop=True)
-    app_log(f"Yahoo {ticker} rows: {len(hist)}", "success")
-    return hist
-
-# -----------------------
-# Spectrum detection & scoring
-# -----------------------
-def calculate_rvol(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
+def calculate_rvol(df):
     df = df.sort_values("date").copy()
-    df["avg_vol_20"] = df["volume"].rolling(window=lookback, min_periods=1).mean()
-    df["rvol"] = df["volume"] / df["avg_vol_20"]
+    df["AvgVol20"] = df["Volume"].rolling(window=20).mean()
+    df["RVOL"] = df["Volume"] / df["AvgVol20"]
+    df.dropna(subset=["RVOL"], inplace=True)
     return df
 
-def detect_spectrum_points(df: pd.DataFrame) -> pd.DataFrame:
+# ----------------------------
+# Compute COT net positions
+
+def compute_cot_net_positions(cot_df):
+    cot_df = cot_df.sort_values("report_date").copy()
+    cot_df["net_comm"] = cot_df["comm_positions_long_all"] - cot_df["comm_positions_short_all"]
+    cot_df["net_noncomm"] = cot_df["noncomm_positions_long_all"] - cot_df["noncomm_positions_short_all"]
+    return cot_df
+
+# ----------------------------
+# COT short term score
+
+def cot_short_term_score(cot_df):
+    if cot_df.shape[0] < 2:
+        return 3
+    latest = cot_df.iloc[-1]
+    prev = cot_df.iloc[-2]
+    delta_comm = latest["net_comm"] - prev["net_comm"]
+    delta_noncomm = latest["net_noncomm"] - prev["net_noncomm"]
+
+    comm_score = 5 if delta_comm > 0 else 0 if delta_comm < 0 else 3
+    noncomm_score = 5 if delta_noncomm > 0 else 0 if delta_noncomm < 0 else 3
+
+    return (comm_score + noncomm_score) / 2
+
+# ----------------------------
+# COT long term score
+
+def cot_long_term_score(cot_df):
+    if cot_df.shape[0] < 12:
+        return 3
+    df_12 = cot_df.tail(12)
+    net_comm = df_12["net_comm"].values
+    net_noncomm = df_12["net_noncomm"].values
+    comm_trend = np.polyfit(range(12), net_comm, 1)[0]
+    noncomm_trend = np.polyfit(range(12), net_noncomm, 1)[0]
+
+    comm_score = 5 if comm_trend < 0 else 0 if comm_trend > 0 else 3
+    noncomm_score = 5 if noncomm_trend > 0 else 0 if noncomm_trend < 0 else 3
+    return (comm_score + noncomm_score) / 2
+
+# ----------------------------
+# Open interest score
+
+def open_interest_score(yahoo_df):
+    if yahoo_df.empty or "OpenInterest" not in yahoo_df.columns or yahoo_df["OpenInterest"].isna().all():
+        return 3
+    oi = yahoo_df["OpenInterest"].dropna()
+    if len(oi) < 20:
+        return 3
+    slope = np.polyfit(range(len(oi)), oi, 1)[0]
+    if slope > 0:
+        return 5
+    elif slope < 0:
+        return 0
+    else:
+        return 3
+
+# ----------------------------
+# Spectrum score and detection points
+
+def calculate_spectrum_score(df):
+    df = df.sort_values("date").copy()
+    df = df.tail(LOOKBACK_DAYS_SPECTRUM)
+    if len(df) < LOOKBACK_DAYS_SPECTRUM:
+        return 3, pd.DataFrame()
+
+    df = calculate_rvol(df)
     if df.empty:
-        return pd.DataFrame()
-    df_tail = df.sort_values("date").tail(LOOKBACK_DAYS_SPECTRUM).reset_index(drop=True)
-    if df_tail.empty or len(df_tail) < 3:
-        return pd.DataFrame()
-    df_tail = calculate_rvol(df_tail)
-    rvol_thresh = np.percentile(df_tail["rvol"].dropna(), RVOL_PERCENTILE * 100)
-    pts = []
-    for i in range(len(df_tail)):
-        if pd.isna(df_tail.loc[i, "rvol"]):
-            continue
-        if df_tail.loc[i, "rvol"] >= rvol_thresh:
-            start = max(i - 4, 0)
-            end = min(i + 4, len(df_tail) - 1)
-            ps = df_tail.loc[start, "close"]
-            pe = df_tail.loc[end, "close"]
-            vs = df_tail.loc[start, "volume"] if "volume" in df_tail.columns else 0
-            ve = df_tail.loc[end, "volume"] if "volume" in df_tail.columns else 0
-            if ps == 0:
+        return 3, pd.DataFrame()
+
+    rvol_78th = df["RVOL"].quantile(0.78)
+
+    total_weight = 0
+    count = 0
+    detected_points = []
+
+    def accumulation_weight(ret_pct):
+        if 0 <= ret_pct < 1:
+            return 1
+        elif 1 <= ret_pct < 2:
+            return 2
+        elif ret_pct >= 2:
+            return 3
+        return 0
+
+    def distribution_weight(ret_pct):
+        if -1 <= ret_pct < 0:
+            return -1
+        elif -2 <= ret_pct < -1:
+            return -2
+        elif ret_pct < -2:
+            return -3
+        return 0
+
+    if len(df) < 10:
+        trend_score = 3
+    else:
+        prices = df["Close"].values.reshape(-1, 1)
+        days = np.arange(len(prices)).reshape(-1, 1)
+        model = LinearRegression()
+        model.fit(days, prices)
+        slope = model.coef_[0][0]
+        if slope > 0.1:
+            trend_score = 5
+        elif 0.05 < slope <= 0.1:
+            trend_score = 4
+        elif -0.05 <= slope <= 0.05:
+            trend_score = 3
+        elif -0.1 <= slope < -0.05:
+            trend_score = 2
+        else:
+            trend_score = 1
+
+    for idx in range(1, len(df) - 1):
+        row = df.iloc[idx]
+        if row["RVOL"] >= rvol_78th:
+            prev_close = df.iloc[idx - 1]["Close"]
+            if prev_close == 0:
                 continue
-            price_change_pct = (pe - ps) / ps * 100
-            vol_change_pct = ((ve - vs) / vs * 100) if vs != 0 else 0
-            if price_change_pct >= 0 and vol_change_pct > 0:
-                kind = "Accumulation"
-            elif price_change_pct < 0 and vol_change_pct > 0:
-                kind = "Distribution"
+            ret_pct = ((row["Close"] - prev_close) / prev_close) * 100
+            if ret_pct >= 0:
+                weight = accumulation_weight(ret_pct)
+                point_type = "Accumulation"
             else:
-                continue
-            next_idx = min(i + 1, len(df_tail) - 1)
-            next_close = df_tail.loc[next_idx, "close"]
-            event_close = df_tail.loc[i, "close"]
-            next_day_return = (next_close - event_close) / event_close * 100 if event_close != 0 else 0
-            pts.append({
-                "index": i,
-                "date": df_tail.loc[i, "date"],
-                "type": kind,
-                "price_change_pct": price_change_pct,
-                "vol_change_pct": vol_change_pct,
-                "rvol": df_tail.loc[i, "rvol"],
-                "next_day_return_pct": next_day_return
+                weight = distribution_weight(ret_pct)
+                point_type = "Distribution"
+
+            total_weight += weight
+            count += 1
+
+            next_close = df.iloc[idx + 1]["Close"]
+            next_ret = ((next_close - row["Close"]) / row["Close"]) * 100
+
+            detected_points.append({
+                "Date": row["date"].date(),
+                "Type": point_type,
+                "Return %": round(ret_pct, 2),
+                "Next Day Return %": round(next_ret, 2),
+                "Weight": weight,
             })
-    return pd.DataFrame(pts)
 
-def assign_weights_and_score(points: pd.DataFrame) -> Tuple[float, pd.DataFrame]:
-    if points.empty:
-        return 3.0, points
-    weights = []
-    for _, r in points.iterrows():
-        pchg = r["price_change_pct"]
-        nd = r["next_day_return_pct"]
-        if r["type"] == "Accumulation":
-            if 0 <= pchg < 1:
-                pw = 1
-            elif 1 <= pchg < 2:
-                pw = 2
-            else:
-                pw = 3
-            if 0 <= nd < 1:
-                nw = 1
-            elif 1 <= nd < 2:
-                nw = 2
-            else:
-                nw = 3
-            total = pw + nw
-        else:
-            if -1 <= pchg < 0:
-                pw = -1
-            elif -2 <= pchg < -1:
-                pw = -2
-            else:
-                pw = -3
-            if -1 <= nd < 0:
-                nw = -1
-            elif -2 <= nd < -1:
-                nw = -2
-            else:
-                nw = -3
-            total = pw + nw
-        weights.append(total)
-    points = points.copy()
-    points["weight_raw"] = weights
-    clipped = np.clip(points["weight_raw"], -6, 6)
-    points["weight_norm_0_5"] = (clipped + 6) / 12 * 5.0
-    pv_score = float(points["weight_norm_0_5"].mean()) if not points.empty else 3.0
-    pv_score = max(0.0, min(5.0, pv_score))
-    return pv_score, points
+    avg_weight = total_weight / count if count > 0 else 0
+    spectrum_score = trend_score + avg_weight
+    spectrum_score = max(1, min(5, spectrum_score))  # Clamp between 1 and 5
 
-def trending_score_from_prices(df: pd.DataFrame) -> float:
-    tail = df.sort_values("date").tail(LOOKBACK_DAYS_SPECTRUM)
-    if tail.empty or len(tail) < 2:
-        return 3.0
-    pct_change = (tail["close"].iloc[-1] - tail["close"].iloc[0]) / tail["close"].iloc[0] * 100
-    if pct_change > UPTREND_PCT:
-        return 5.0
-    if pct_change < DOWNTREND_PCT:
-        return 1.0
-    return 3.0
+    points_df = pd.DataFrame(detected_points)
 
-# -----------------------
-# COT scoring
-# -----------------------
-def compute_cot_scores(cot_df: pd.DataFrame) -> Tuple[float, float]:
-    if cot_df.empty:
-        return 3.0, 3.0
-    if not all(c in cot_df.columns for c in ["noncomm_positions_long_all", "noncomm_positions_short_all",
-                                             "comm_positions_long_all", "comm_positions_short_all"]):
-        return 3.0, 3.0
-    cot = cot_df.sort_values("report_date").copy()
-    cot["noncomm_net"] = cot["noncomm_positions_long_all"] - cot["noncomm_positions_short_all"]
-    cot["comm_net"] = cot["comm_positions_long_all"] - cot["comm_positions_short_all"]
-    # short-term
-    if len(cot) < 2:
-        short_score = 3.0
-    else:
-        latest = cot.iloc[-1]
-        prev = cot.iloc[-2]
-        delta_noncomm = latest["noncomm_net"] - prev["noncomm_net"]
-        delta_comm = latest["comm_net"] - prev["comm_net"]
-        noncomm_score = 5.0 if delta_noncomm > 0 else (1.0 if delta_noncomm < 0 else 3.0)
-        comm_score = 5.0 if delta_comm < 0 else (1.0 if delta_comm > 0 else 3.0)
-        short_score = (noncomm_score + comm_score) / 2.0
-    # long-term 12-week MA trend
-    if len(cot) < 12:
-        long_score = 3.0
-    else:
-        cot["noncomm_net_ma12"] = cot["noncomm_net"].rolling(window=12, min_periods=1).mean()
-        cot["comm_net_ma12"] = cot["comm_net"].rolling(window=12, min_periods=1).mean()
-        ma_noncomm = cot["noncomm_net_ma12"].dropna().values
-        ma_comm = cot["comm_net_ma12"].dropna().values
-        if len(ma_noncomm) < 2 or len(ma_comm) < 2:
-            long_score = 3.0
-        else:
-            noncomm_trend = ma_noncomm[-1] - ma_noncomm[0]
-            comm_trend = ma_comm[-1] - ma_comm[0]
-            noncomm_score_lt = 5.0 if noncomm_trend > 0 else (1.0 if noncomm_trend < 0 else 3.0)
-            comm_score_lt = 5.0 if comm_trend < 0 else (1.0 if comm_trend > 0 else 3.0)
-            long_score = (noncomm_score_lt + comm_score_lt) / 2.0
-    return short_score, long_score
+    return spectrum_score, points_df
 
-# -----------------------
-# Orchestrator per asset
-# -----------------------
-def process_asset(display: str, cot_name: str, ticker: str, start_iso: str, end_iso: str) -> Dict[str, Any]:
-    result = {"display": display, "ok": False, "error": None}
+# ----------------------------
+# Worker function for threaded data fetching
+
+def fetch_data_for_asset(cot_name, display_name, start_date, end_date, results_dict):
     try:
-        cot_df = fetch_cot_data_by_market(cot_name)
-        price_df = fetch_yahoo_history(ticker, start_iso, end_iso)
-        if cot_df.empty:
-            app_log(f"[{display}] COT data empty.", "warning")
-        if price_df.empty:
-            app_log(f"[{display}] Price data empty.", "warning")
-        if cot_df.empty or price_df.empty:
-            result["error"] = "missing_data"
-            return result
-        points = detect_spectrum_points(price_df)
-        pv_score, points = assign_weights_and_score(points)
-        trend_score = trending_score_from_prices(price_df)
-        cot_short, cot_long = compute_cot_scores(cot_df)
-        cot_combined = cot_short * COT_SHORT_TERM_WT + cot_long * COT_LONG_TERM_WT
-        oi_score = 3.0
-        if "openinterest" in price_df.columns:
-            oi_vals = price_df["openinterest"].dropna()
-            if len(oi_vals) >= 20:
-                slope = np.polyfit(range(len(oi_vals)), oi_vals, 1)[0]
-                oi_score = 5.0 if slope > 0 else (1.0 if slope < 0 else 3.0)
-        health_raw = pv_score * WEIGHT_PV_RVOL + cot_combined * WEIGHT_COT + oi_score * WEIGHT_OI
-        health = int(round(max(0, min(5, health_raw))))
-        result.update({
-            "ok": True,
+        cot_df = fetch_cot_data(cot_name)
+        yahoo_symbol = YAHOO_SYMBOLS.get(display_name, None)
+        yahoo_df = pd.DataFrame()
+        if yahoo_symbol:
+            yahoo_df = fetch_yahoo_data(yahoo_symbol, start_date, end_date)
+        results_dict[display_name] = {
             "cot_df": cot_df,
-            "price_df": price_df,
-            "points_df": points.reset_index(drop=True),
-            "pv_score": pv_score,
-            "trend_score": trend_score,
-            "cot_short": cot_short,
-            "cot_long": cot_long,
-            "cot_combined": cot_combined,
-            "oi_score": oi_score,
-            "health": health
-        })
-        app_log(f"[{display}] done: health={health}, pv={pv_score:.2f}, cot={cot_combined:.2f}, oi={oi_score:.2f}", "success")
-        return result
+            "yahoo_df": yahoo_df
+        }
+        logger.info(f"Fetched data for {display_name}")
     except Exception as e:
-        app_log(f"[{display}] processing failed: {e}", "error")
-        result["error"] = str(e)
-        return result
+        logger.error(f"Exception fetching data for {display_name}: {e}")
 
-# -----------------------
-# Plot helpers
-# -----------------------
-def plot_event_with_next_day(price_df: pd.DataFrame, event_date, window=1):
-    price_df = price_df.sort_values("date").reset_index(drop=True)
-    if isinstance(event_date, str):
-        event_date = datetime.datetime.fromisoformat(event_date).date()
-    idxs = price_df.index[price_df["date"] == event_date].tolist()
-    if not idxs:
-        st.warning("Event date not in price data.")
+# ----------------------------
+# Main Streamlit app function
+
+def main():
+    st.title("Gold & Silver Health Gauge & More")
+
+    st.markdown("""
+    This dashboard evaluates the health of multiple markets using:
+    - COT data (Commitments of Traders)
+    - Price, Volume & Relative Volume spectrum analysis
+    - Open Interest trends
+    """)
+
+    start_date = st.date_input("Start Date", datetime.date(2024, 8, 9))
+    end_date = st.date_input("End Date", datetime.date(2025, 8, 9))
+
+    if start_date > end_date:
+        st.error("Start Date must be before End Date.")
         return
-    idx = idxs[0]
-    start = max(idx - window, 0)
-    end = min(idx + window + 1, len(price_df))
-    sub = price_df.iloc[start:end]
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=sub["date"], y=sub["close"], mode="lines+markers", name="Close"))
-    fig.add_vrect(x0=event_date, x1=event_date, fillcolor="LightGreen", opacity=0.25, layer="below", line_width=0)
-    if idx + 1 < len(price_df):
-        next_day = price_df.loc[idx + 1, "date"]
-        fig.add_vrect(x0=next_day, x1=next_day, fillcolor="LightBlue", opacity=0.25, layer="below", line_width=0)
-    fig.update_layout(title="Event Day and Next Day Price", xaxis_title="Date", yaxis_title="Price")
-    st.plotly_chart(fig, use_container_width=True)
 
-def plot_overview_price_with_points(price_df: pd.DataFrame, points_df: pd.DataFrame):
-    df = price_df.sort_values("date").reset_index(drop=True)
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=df["date"], y=df["close"], mode="lines", name="Close"))
-    if not points_df.empty:
-        accum = points_df[points_df["type"] == "Accumulation"]
-        distrib = points_df[points_df["type"] == "Distribution"]
-        if not accum.empty:
-            yvals = [df.loc[df["date"] == d, "close"].values[0] if not df.loc[df["date"] == d, "close"].empty else None for d in accum["date"]]
-            fig.add_trace(go.Scatter(x=accum["date"], y=yvals, mode="markers", name="Accumulation", marker=dict(color="green", symbol="triangle-up", size=10)))
-        if not distrib.empty:
-            yvals = [df.loc[df["date"] == d, "close"].values[0] if not df.loc[df["date"] == d, "close"].empty else None for d in distrib["date"]]
-            fig.add_trace(go.Scatter(x=distrib["date"], y=yvals, mode="markers", name="Distribution", marker=dict(color="red", symbol="triangle-down", size=10)))
-    fig.update_layout(title="Price with Detected Points", xaxis_title="Date", yaxis_title="Price", xaxis_rangeslider_visible=True)
-    st.plotly_chart(fig, use_container_width=True)
+    results = {}
+    threads = []
 
-# -----------------------
-# Streamlit UI
-# -----------------------
-st.set_page_config(page_title="Markets Health Gauge", layout="wide")
-st.title("Markets Health Gauge — multi-asset (synchronized fetch)")
+    with st.spinner("Fetching data for all assets..."):
+        # Launch threaded fetches
+        for cot_name, display_name in ASSETS.items():
+            thread = threading.Thread(target=fetch_data_for_asset,
+                                      args=(cot_name, display_name, start_date.isoformat(), end_date.isoformat(), results))
+            threads.append(thread)
+            thread.start()
 
-st.markdown("Assets: " + ", ".join(ASSET_MAP.keys()))
+        for thread in threads:
+            thread.join()
 
-col1, col2 = st.columns(2)
-with col1:
-    default_end = datetime.date.today()
-    end_date = st.date_input("End Date", value=default_end)
-with col2:
-    default_start = default_end - datetime.timedelta(days=365)
-    start_date = st.date_input("Start Date", value=default_start)
+    st.success("Data fetching complete.")
 
-if start_date >= end_date:
-    st.error("Start date must be before end date")
-    st.stop()
+    # Analyze and display results
+    for asset, data in results.items():
+        cot_df = data.get("cot_df", pd.DataFrame())
+        yahoo_df = data.get("yahoo_df", pd.DataFrame())
 
-# parallelism setting + refresh
-workers = st.sidebar.slider("Parallel workers", 2, 16, 8)
-if st.sidebar.button("Refresh (clear caches)"):
-    st.cache_data.clear()
-    st.experimental_rerun()
+        st.header(f"{asset} Market Health")
 
-start_iso = start_date.isoformat()
-end_iso = end_date.isoformat()
+        if cot_df.empty:
+            st.warning(f"No COT data available for {asset}.")
+            continue
 
-status_ph = st.empty()
-logs_ph = st.empty()
+        if yahoo_df.empty:
+            st.warning(f"No price/volume data available for {asset}.")
+            continue
 
-assets = [(disp, *ASSET_MAP[disp]) for disp in ASSET_MAP.keys()]
+        # Compute scores
+        cot_df = compute_cot_net_positions(cot_df)
+        short_score = cot_short_term_score(cot_df)
+        long_score = cot_long_term_score(cot_df)
+        cot_score = COT_SHORT_TERM_WT * short_score + COT_LONG_TERM_WT * long_score
+        oi_score = open_interest_score(yahoo_df)
+        spectrum_score, spectrum_points = calculate_spectrum_score(yahoo_df)
 
-results = {}
-start_time = time.time()
-status_ph.info(f"Starting processing {len(assets)} assets with {workers} workers...")
+        overall_score = (
+            WEIGHT_PV_RVOL * spectrum_score +
+            WEIGHT_COT * cot_score +
+            WEIGHT_OI * oi_score
+        )
 
-with ThreadPoolExecutor(max_workers=workers) as ex:
-    futures = {ex.submit(process_asset, disp, cotn, tkr, start_iso, end_iso): disp for disp, cotn, tkr in assets}
-    completed = 0
-    logs = []
-    for f in as_completed(futures):
-        disp = futures[f]
-        try:
-            res = f.result()
-        except Exception as e:
-            res = {"display": disp, "ok": False, "error": str(e)}
-            app_log(f"{disp} exception: {e}", "error")
-        results[disp] = res
-        completed += 1
-        status_ph.info(f"Completed {completed}/{len(assets)}")
-        logs.append(f"{disp}: {'OK' if res.get('ok') else 'ERR'} - {res.get('error')}")
-        logs_ph.text("\n".join(logs))
+        st.write(f"**COT Short-term Score:** {short_score:.2f}")
+        st.write(f"**COT Long-term Score:** {long_score:.2f}")
+        st.write(f"**Combined COT Score:** {cot_score:.2f}")
+        st.write(f"**Open Interest Score:** {oi_score:.2f}")
+        st.write(f"**Spectrum Score:** {spectrum_score:.2f}")
+        st.write(f"**Overall Health Score:** {overall_score:.2f} (1=Weakest, 5=Strongest)")
 
-elapsed = time.time() - start_time
-status_ph.success(f"All done in {elapsed:.1f}s")
+        # Display spectrum points if any
+        if not spectrum_points.empty:
+            st.subheader("Spectrum Detected Points")
+            st.dataframe(spectrum_points)
 
-# asset inspector
-selected = st.sidebar.selectbox("Inspect asset", list(ASSET_MAP.keys()), index=0)
-res = results.get(selected)
-if not res:
-    st.warning("No result for selected asset")
-else:
-    st.header(selected)
-    if not res.get("ok"):
-        st.error(f"Failed: {res.get('error')}")
-    else:
-        st.write(f"Ticker: {res['ticker']}")
-        st.metric("Health (0-5)", res["health"])
-        st.write("- PV score:", round(res["pv_score"], 2))
-        st.write("- Trend score:", round(res["trend_score"], 2))
-        st.write(f"- COT short: {res['cot_short']:.2f}, COT long: {res['cot_long']:.2f}, combine
+        # Plot price and relative volume
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=yahoo_df["date"], y=yahoo_df["Close"], mode="lines", name="Close Price"))
+        fig.update_layout(title=f"{asset} Price Chart", xaxis_title="Date", yaxis_title="Price")
+        st.plotly_chart(fig, use_container_width=True)
+
+if __name__ == "__main__":
+    main()
