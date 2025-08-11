@@ -6,7 +6,6 @@ import logging
 from sodapy import Socrata
 from sklearn.linear_model import LinearRegression
 import yahooquery as yq
-import threading
 
 # ----------------------------
 # Setup logging
@@ -293,28 +292,10 @@ def calculate_spectrum_score(df):
     return spectrum_score, points_df
 
 # ----------------------------
-# Worker function for threaded data fetching
-
-def fetch_data_for_asset(cot_name, display_name, start_date, end_date, results_dict):
-    try:
-        cot_df = fetch_cot_data(cot_name)
-        yahoo_symbol = YAHOO_SYMBOLS.get(display_name, None)
-        yahoo_df = pd.DataFrame()
-        if yahoo_symbol:
-            yahoo_df = fetch_yahoo_data(yahoo_symbol, start_date, end_date)
-        results_dict[display_name] = {
-            "cot_df": cot_df,
-            "yahoo_df": yahoo_df
-        }
-        logger.info(f"Fetched data for {display_name}")
-    except Exception as e:
-        logger.error(f"Exception fetching data for {display_name}: {e}")
-
-# ----------------------------
 # Main Streamlit app function
 
 def main():
-    st.title("Gold & Silver Health Gauge & More")
+    st.title("Gold, Silver & Other Markets Health Gauge")
 
     st.markdown("""
     This dashboard evaluates the health of multiple markets using:
@@ -330,35 +311,22 @@ def main():
         st.error("Start Date must be before End Date.")
         return
 
-    results = {}
-    threads = []
+    for cot_name, display_name in ASSETS.items():
+        with st.spinner(f"Fetching data for {display_name}..."):
+            cot_df = fetch_cot_data(cot_name)
+            yahoo_symbol = YAHOO_SYMBOLS.get(display_name)
+            yahoo_df = pd.DataFrame()
+            if yahoo_symbol:
+                yahoo_df = fetch_yahoo_data(yahoo_symbol, start_date.isoformat(), end_date.isoformat())
 
-    with st.spinner("Fetching data for all assets..."):
-        # Launch threaded fetches
-        for cot_name, display_name in ASSETS.items():
-            thread = threading.Thread(target=fetch_data_for_asset,
-                                      args=(cot_name, display_name, start_date.isoformat(), end_date.isoformat(), results))
-            threads.append(thread)
-            thread.start()
-
-        for thread in threads:
-            thread.join()
-
-    st.success("Data fetching complete.")
-
-    # Analyze and display results
-    for asset, data in results.items():
-        cot_df = data.get("cot_df", pd.DataFrame())
-        yahoo_df = data.get("yahoo_df", pd.DataFrame())
-
-        st.header(f"{asset} Market Health")
+        st.header(f"{display_name} Market Health")
 
         if cot_df.empty:
-            st.warning(f"No COT data available for {asset}.")
+            st.warning(f"No COT data available for {display_name}. Skipping analysis.")
             continue
 
         if yahoo_df.empty:
-            st.warning(f"No price/volume data available for {asset}.")
+            st.warning(f"No price/volume data available for {display_name}. Skipping analysis.")
             continue
 
         # Compute scores
@@ -387,11 +355,8 @@ def main():
             st.subheader("Spectrum Detected Points")
             st.dataframe(spectrum_points)
 
-        # Plot price and relative volume
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=yahoo_df["date"], y=yahoo_df["Close"], mode="lines", name="Close Price"))
-        fig.update_layout(title=f"{asset} Price Chart", xaxis_title="Date", yaxis_title="Price")
-        st.plotly_chart(fig, use_container_width=True)
+        # Price chart
+        st.line_chart(yahoo_df.set_index("date")["Close"])
 
 if __name__ == "__main__":
     main()
