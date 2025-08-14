@@ -25,11 +25,7 @@ required_fields = [
     "market_and_exchange_names",
     "report_date_as_yyyy_mm_dd",
     "noncomm_positions_long_all",
-    "noncomm_positions_short_all",
-    "comm_positions_long_all",
-    "comm_positions_short_all",
-    "nonrept_positions_long_all",
-    "nonrept_positions_short_all"
+    "noncomm_positions_short_all"
 ]
 
 # ===========================
