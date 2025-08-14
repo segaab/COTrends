@@ -4,13 +4,12 @@ import datetime
 from datetime import timedelta
 from sodapy import Socrata
 from fredapi import Fred
-import requests
 
 # ===========================
-# API KEYS (hardcoded or env)
+# API KEYS
 # ===========================
 FRED_API_KEY = "91bb2c5920fb8f843abdbbfdfcab5345"
-SODAPY_APP_TOKEN = "WSCaavlIcDgtLVZbJA1FKkq40"
+SODAPY_APP_TOKEN = os.getenv("WSCaavlIcDgtLVZbJA1FKkq40")
 
 # ===========================
 # INITIALIZE CLIENTS
@@ -25,7 +24,11 @@ required_fields = [
     "market_and_exchange_names",
     "report_date_as_yyyy_mm_dd",
     "noncomm_positions_long_all",
-    "noncomm_positions_short_all"
+    "noncomm_positions_short_all",
+    "comm_positions_long_all",
+    "comm_positions_short_all",
+    "nonrept_positions_long_all",
+    "nonrept_positions_short_all"
 ]
 
 # ===========================
@@ -35,7 +38,6 @@ def get_last_two_cot_reports(client):
     edt_now = datetime.datetime.utcnow() - timedelta(hours=4)
     last_friday = edt_now - timedelta(days=(edt_now.weekday() - 4) % 7)
 
-    # Friday before 3:30 PM ET uses previous week
     report_time = last_friday.replace(hour=15, minute=30, second=0)
     if edt_now.weekday() == 4 and edt_now < report_time:
         last_friday -= timedelta(weeks=1)
@@ -57,8 +59,8 @@ def get_last_two_cot_reports(client):
         select=",".join(required_fields)
     )
 
-    latest_df = pd.DataFrame.from_records(latest_result) if latest_result else None
-    previous_df = pd.DataFrame.from_records(previous_result) if previous_result else None
+    latest_df = pd.DataFrame.from_records(latest_result) if latest_result else pd.DataFrame(columns=required_fields)
+    previous_df = pd.DataFrame.from_records(previous_result) if previous_result else pd.DataFrame(columns=required_fields)
 
     return latest_df, previous_df
 
@@ -75,48 +77,52 @@ def fetch_fred_series(series_id, start_date="2010-01-01", end_date=None):
     return df
 
 # ===========================
-# FUNCTION: FETCH INVESTMENT BANK CSVS
+# FUNCTIONS: LOAD CSVS WITH FALLBACK
 # ===========================
 def load_bank_csv(file_path="bank_balance_sheets.csv"):
-    """
-    Load bank loan portfolios and deposit data from CSV.
-    """
-    return pd.read_csv(file_path)
+    try:
+        return pd.read_csv(file_path)
+    except FileNotFoundError:
+        print(f"[WARNING] {file_path} not found. Returning empty DataFrame.")
+        return pd.DataFrame(columns=["Loan Portfolio Value", "Deposit Base Value"])
 
 def load_interest_rate_csv(file_path="bank_interest_rates.csv"):
-    """
-    Load bank loan prime rate CSV.
-    """
-    return pd.read_csv(file_path)
+    try:
+        return pd.read_csv(file_path)
+    except FileNotFoundError:
+        print(f"[WARNING] {file_path} not found. Returning empty DataFrame.")
+        return pd.DataFrame(columns=["Bank", "Date", "Loan Prime Rate"])
 
-# ===========================
-# FUNCTION: FETCH CORPORATE BOND DATA
-# ===========================
 def load_corporate_bonds_csv(file_path="corporate_bonds.csv"):
-    return pd.read_csv(file_path)
+    try:
+        return pd.read_csv(file_path)
+    except FileNotFoundError:
+        print(f"[WARNING] {file_path} not found. Returning empty DataFrame.")
+        return pd.DataFrame(columns=["Bond", "Date", "Yield"])
 
-# ===========================
-# FUNCTION: FETCH MARKET DATA (Fed Funds, SOFR, Implied Volatility)
-# ===========================
 def load_market_data_csv(file_path="market_data.csv"):
-    return pd.read_csv(file_path)
+    try:
+        return pd.read_csv(file_path)
+    except FileNotFoundError:
+        print(f"[WARNING] {file_path} not found. Returning empty DataFrame.")
+        return pd.DataFrame(columns=["Date", "Fed Funds Futures", "SOFR", "Implied Volatility"])
 
 # ===========================
 # MAIN EXECUTION
 # ===========================
 if __name__ == "__main__":
-    # 1. Fetch last two COT reports
+    # 1. Fetch COT reports
     latest_cot, previous_cot = get_last_two_cot_reports(client)
-    print("Latest COT Report:\n", latest_cot.head() if latest_cot is not None else "No data")
-    print("\nPrevious COT Report:\n", previous_cot.head() if previous_cot is not None else "No data")
+    print("Latest COT Report:\n", latest_cot.head())
+    print("\nPrevious COT Report:\n", previous_cot.head())
 
-    # 2. Fetch FRED series examples
+    # 2. Fetch FRED series
     fed_funds = fetch_fred_series("FEDFUNDS", start_date="2013-01-01")
     sofr = fetch_fred_series("SOFR", start_date="2018-01-01")
     print("\nFed Funds Sample:\n", fed_funds.head())
     print("\nSOFR Sample:\n", sofr.head())
 
-    # 3. Load bank balance sheets and interest rates
+    # 3. Load bank CSVs
     bank_df = load_bank_csv()
     rates_df = load_interest_rate_csv()
     print("\nBank Balance Sheets Sample:\n", bank_df.head())
