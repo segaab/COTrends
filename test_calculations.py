@@ -9,7 +9,7 @@ from fredapi import Fred
 # API KEYS
 # ===========================
 FRED_API_KEY = "91bb2c5920fb8f843abdbbfdfcab5345"
-SODAPY_APP_TOKEN = os.getenv("WSCaavlIcDgtLVZbJA1FKkq40")
+SODAPY_APP_TOKEN = "WSCaavlIcDgtLVZbJA1FKkq40"
 
 # ===========================
 # INITIALIZE CLIENTS
@@ -24,11 +24,7 @@ required_fields = [
     "market_and_exchange_names",
     "report_date_as_yyyy_mm_dd",
     "noncomm_positions_long_all",
-    "noncomm_positions_short_all",
-    "comm_positions_long_all",
-    "comm_positions_short_all",
-    "nonrept_positions_long_all",
-    "nonrept_positions_short_all"
+    "noncomm_positions_short_all"
 ]
 
 # ===========================
