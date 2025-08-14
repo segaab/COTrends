@@ -10,7 +10,7 @@ import requests
 # API KEYS (hardcoded or env)
 # ===========================
 FRED_API_KEY = "91bb2c5920fb8f843abdbbfdfcab5345"
-SODAPY_APP_TOKEN = os.getenv("WSCaavlIcDgtLVZbJA1FKkq40")
+SODAPY_APP_TOKEN = "WSCaavlIcDgtLVZbJA1FKkq40"
 
 # ===========================
 # INITIALIZE CLIENTS
