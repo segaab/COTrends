@@ -10,7 +10,7 @@ import os
 # API KEYS
 # ===========================
 FRED_API_KEY = "91bb2c5920fb8f843abdbbfdfcab5345"
-SODAPY_APP_TOKEN = "WSCaavlIcDgtLVZbJA1FKkq40"
+SODAPY_APP_TOKEN = os.getenv("WSCaavlIcDgtLVZbJA1FKkq40")
 
 # ===========================
 # INITIALIZE CLIENTS
@@ -99,11 +99,12 @@ st.title("Hybrid Market Data Dashboard")
 # 1. COT Data
 st.header("Commitments of Traders (COT) Reports")
 latest_cot, previous_cot = get_last_two_cot_reports(client)
+
 st.subheader("Latest COT Report")
-st.dataframe(latest_cot if not latest_cot.empty else "No data available.")
+st.dataframe(latest_cot if not latest_cot.empty else pd.DataFrame())
 
 st.subheader("Previous COT Report")
-st.dataframe(previous_cot if not previous_cot.empty else "No data available.")
+st.dataframe(previous_cot if not previous_cot.empty else pd.DataFrame())
 
 # 2. FRED Series
 st.header("FRED Series Data")
@@ -136,4 +137,4 @@ st.subheader("Corporate Bonds")
 st.dataframe(corporate_df)
 
 st.subheader("Market Data")
-st.dataframe(market_df), market_df.head())
+st.dataframe(market_df)
