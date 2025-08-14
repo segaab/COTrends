@@ -1,86 +1,87 @@
 # hybrid_data_pipeline.py
-import os
-import requests
 import pandas as pd
 from sodapy import Socrata
+from fredapi import Fred
 from datetime import datetime, timedelta
 
-# ==== HARDCODED CREDENTIALS ====
+# ========================
+# HARD-CODED CONFIGURATION
+# ========================
 FRED_API_KEY = "91bb2c5920fb8f843abdbbfdfcab5345"
 SODAPY_API_KEY = "1h3ijfuomvrayys00k5cvk38y3nl2wpk0whnlosfj6o7tuuu7n"
-SODAPY_EMAIL = "segaab120@gmail.com"
+SECONDARY_EMAIL = "segaab120@gmail.com"  # For contact/reference only
 
-# ==== FRED Data Fetch Function ====
-def fetch_fred_series(series_id, start_date=None, end_date=None):
+# ========================
+# INITIALIZE CLIENTS
+# ========================
+# FRED Client
+fred = Fred(api_key=FRED_API_KEY)
+
+# Socrata Client (public data, no auth required)
+client = Socrata(
+    "publicreporting.cftc.gov",
+    SODAPY_API_KEY,
+    timeout=60
+)
+
+# ========================
+# FUNCTIONS
+# ========================
+def get_fred_series(series_id: str, start_date: str = None, end_date: str = None):
     """
-    Fetch data from FRED API for a given series ID.
+    Fetch a time series from FRED API.
     """
-    base_url = f"https://api.stlouisfed.org/fred/series/observations"
-    params = {
-        "series_id": series_id,
-        "api_key": FRED_API_KEY,
-        "file_type": "json"
-    }
-    if start_date:
-        params["observation_start"] = start_date
-    if end_date:
-        params["observation_end"] = end_date
-
-    print(f"Fetching FRED series {series_id}...")
-    r = requests.get(base_url, params=params)
-    r.raise_for_status()
-    data = r.json()
-
-    df = pd.DataFrame(data["observations"])
-    if not df.empty:
-        df["value"] = pd.to_numeric(df["value"], errors="coerce")
-        df["date"] = pd.to_datetime(df["date"])
+    data = fred.get_series(series_id, observation_start=start_date, observation_end=end_date)
+    df = pd.DataFrame(data, columns=["value"])
+    df.index.name = "date"
+    df.reset_index(inplace=True)
     return df
 
-# ==== COT Data Fetch Function (Socrata API) ====
-def fetch_cot_data(limit=5000):
+def get_cot_data(dataset_id="6dca-aqww", limit=1000):
     """
-    Fetch latest COT report data from CFTC Socrata endpoint.
+    Fetch COT data from Socrata Public API.
     """
-    client = Socrata("publicreporting.cftc.gov", SODAPY_API_KEY, username=SODAPY_EMAIL)
-    dataset_id = "6dca-aqww"
-
-    print(f"Fetching latest {limit} rows from COT dataset...")
     results = client.get(dataset_id, limit=limit)
-    df = pd.DataFrame.from_records(results)
-    if "report_date_as_yyyy_mm_dd" in df.columns:
-        df["report_date_as_yyyy_mm_dd"] = pd.to_datetime(df["report_date_as_yyyy_mm_dd"])
-    return df
+    return pd.DataFrame.from_records(results)
 
-# ==== Combined Hybrid Data Pipeline ====
-def run_pipeline():
+def get_last_two_reports():
     """
-    Runs the hybrid data pipeline fetching both FRED and COT data.
+    Fetch the latest and previous COT reports based on release rules.
     """
-    # Example FRED series IDs
-    fred_series = {
-        "FEDFUNDS": "Effective Federal Funds Rate",
-        "DGS10": "10-Year Treasury Constant Maturity Rate"
-    }
-    start_date = (datetime.utcnow() - timedelta(days=365)).strftime("%Y-%m-%d")
-    end_date = datetime.utcnow().strftime("%Y-%m-%d")
+    edt_now = datetime.utcnow() - timedelta(hours=4)
+    last_friday = edt_now - timedelta(days=(edt_now.weekday() - 4) % 7)
+    report_time = last_friday.replace(hour=15, minute=30, second=0)
 
-    fred_data = {}
-    for series_id, desc in fred_series.items():
-        fred_data[series_id] = fetch_fred_series(series_id, start_date, end_date)
+    if edt_now.weekday() == 4 and edt_now < report_time:
+        last_friday -= timedelta(weeks=1)
 
-    cot_data = fetch_cot_data(limit=2000)
+    latest_tuesday = last_friday - timedelta(days=3)
+    previous_tuesday = latest_tuesday - timedelta(weeks=1)
 
-    return fred_data, cot_data
+    latest_str = latest_tuesday.strftime('%Y-%m-%d')
+    prev_str = previous_tuesday.strftime('%Y-%m-%d')
 
+    latest_result = client.get("6dca-aqww", where=f"report_date_as_yyyy_mm_dd = '{latest_str}'")
+    prev_result = client.get("6dca-aqww", where=f"report_date_as_yyyy_mm_dd = '{prev_str}'")
 
+    latest_df = pd.DataFrame.from_records(latest_result) if latest_result else None
+    prev_df = pd.DataFrame.from_records(prev_result)
+
+    return latest_df, prev_df
+
+# ========================
+# MAIN EXECUTION EXAMPLE
+# ========================
 if __name__ == "__main__":
-    fred_data, cot_data = run_pipeline()
+    # Example FRED data
+    fred_df = get_fred_series("DGS10", start_date="2020-01-01", end_date="2023-12-31")
+    print("FRED Data Sample:\n", fred_df.head())
 
-    print("\n=== FRED Data Sample ===")
-    for series_id, df in fred_data.items():
-        print(f"\n{series_id} ({len(df)} rows):")
-        print(df.head())
+    # Example COT data
+    cot_df = get_cot_data(limit=5)
+    print("COT Data Sample:\n", cot_df.head())
 
-    print("\n=== COT Data Sample ===")
-    print(cot_data.head())
+    # Latest two reports
+    latest, previous = get_last_two_reports()
+    print("Latest COT Report:\n", latest)
+    print("Previous COT Report:\n", previous)
