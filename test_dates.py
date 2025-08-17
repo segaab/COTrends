@@ -1,326 +1,427 @@
-"""
-Streamlit dashboard: Fed Funds futures (ZQ=F) + SOFR combined-rate (35th percentile filter)
-- Uses yahooquery for market prices and fredapi for SOFR/FEDFUNDS
-- Combined Rate = (SOFR_rolling_avg + ZQ_implied_rate) / 2
-- Entry rule: combined_rate < HISTORICAL_35TH_PERCENTILE (calculated on full combined series)
-- Fixed data window: yesterday 23:00 ET minus 365 days -> yesterday 23:00 ET
-"""
-
-import os
 import streamlit as st
 import pandas as pd
 import numpy as np
-import datetime as dt
-from fredapi import Fred
 from yahooquery import Ticker
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
 
-# ----------------------------
-# Config
-# ----------------------------
-st.set_page_config(page_title="Combined Rate (35th pct) Strategy Dashboard", layout="wide")
-FRED_API_KEY = "91bb2c5920fb8f843abdbbfdfcab5345"
-CACHE_DIR = "./data_cache"
-os.makedirs(CACHE_DIR, exist_ok=True)
+# Configure Streamlit page
+st.set_page_config(
+    page_title="Leader-Follower Trading Strategy Backtest",
+    page_icon="📈",
+    layout="wide"
+)
 
-# ----------------------------
-# Date range: yesterday 23:00 ET back 365 days
-# ----------------------------
-now_utc = dt.datetime.utcnow()
-et_offset = dt.timedelta(hours=4)  # approximate ET offset (adjust if you need exact ET handling)
-now_et = now_utc - et_offset
-yesterday_et = dt.datetime(year=now_et.year, month=now_et.month, day=now_et.day) - dt.timedelta(days=1)
-yesterday_23 = yesterday_et.replace(hour=23, minute=0, second=0, microsecond=0)
-START_DATE = yesterday_23 - dt.timedelta(days=365)
-END_DATE = yesterday_23
+st.title("📈 Leader-Follower Trading Strategy Backtest")
+st.markdown("**AI Sector Wave Trading Analysis (NVDA, AMD, MRVL, ASML)**")
 
-# ----------------------------
-# Helper: fetch price history via yahooquery (robust datetime handling)
-# ----------------------------
-@st.cache_data(ttl=3600)
-def fetch_yahooquery_data(tickers, start, end):
-    """Return dict: ticker -> DataFrame (indexed by datetime) for the given date window (inclusive)."""
-    ticker_obj = Ticker(tickers)
-    # yahooquery.history end param is exclusive; include +1 day to ensure last-day data
-    df = ticker_obj.history(start=start.strftime("%Y-%m-%d"),
-                            end=(end + dt.timedelta(days=1)).strftime("%Y-%m-%d"),
-                            interval="1d")
-    if df is None or df.empty:
-        return {t: pd.DataFrame() for t in tickers}
+# Sidebar for parameters
+st.sidebar.header("Simulation Parameters")
+starting_balance = st.sidebar.number_input("Starting Balance ($)", value=600, min_value=100, step=100)
+start_date = st.sidebar.date_input("Start Date", value=datetime(2023, 1, 1))
+end_date = st.sidebar.date_input("End Date", value=datetime(2024, 7, 1))
 
-    dfs = {}
-    if isinstance(df.index, pd.MultiIndex):
-        for t in tickers:
-            try:
-                df_t = df.loc[t].copy()
-            except Exception:
-                dfs[t] = pd.DataFrame()
-                continue
+# Strategy parameters
+st.sidebar.header("Strategy Settings")
+roc_window = st.sidebar.slider("ROC Window (days)", min_value=5, max_value=30, value=14)
+neg_space_threshold = st.sidebar.slider("Negative Space Threshold", min_value=0.01, max_value=0.1, value=0.05, step=0.01)
 
-            # Convert index robustly, remove tz, drop invalid rows
-            try:
-                if not pd.api.types.is_datetime64_any_dtype(df_t.index):
-                    dt_index = pd.to_datetime(df_t.index, errors="coerce")
-                else:
-                    dt_index = df_t.index
+@st.cache_data
+def fetch_stock_data(symbols, start_date, end_date):
+    """Fetch stock data using yahooquery"""
+    try:
+        ticker = Ticker(symbols)
+        data = ticker.history(start=start_date, end=end_date, interval='1d')
+        
+        if isinstance(data.index, pd.MultiIndex):
+            # Reset index to get symbol as column
+            data = data.reset_index()
+            data = data.pivot(index='date', columns='symbol', values='adjclose')
+        
+        return data.fillna(method='ffill').dropna()
+    except Exception as e:
+        st.error(f"Error fetching data: {e}")
+        return None
 
-                # remove timezone if present
-                if getattr(dt_index, "tz", None) is not None:
-                    dt_index = dt_index.tz_convert(None) if hasattr(dt_index, "tz_convert") else dt_index.tz_localize(None)
+def normalize_prices(prices):
+    """Normalize prices to percentage returns from the first day"""
+    return (prices / prices.iloc[0] - 1) * 100
 
-                df_t = df_t.assign(_dt_index=dt_index)
-                df_t = df_t.dropna(subset=["_dt_index"])
-                df_t.index = df_t["_dt_index"]
-                df_t = df_t.drop(columns=["_dt_index"])
-            except Exception as e:
-                st.warning(f"Date parsing issue for {t}: {e}")
-                dfs[t] = pd.DataFrame()
-                continue
+def calculate_negative_space(leader_prices, follower_prices):
+    """Calculate negative space between leader and followers using normalized prices"""
+    # Normalize all prices to percentage returns from start
+    leader_norm = normalize_prices(leader_prices)
+    
+    # Normalize each follower and calculate average
+    follower_norms = []
+    for col in follower_prices.columns:
+        follower_norm = normalize_prices(follower_prices[col])
+        follower_norms.append(follower_norm)
+    
+    # Average of normalized follower performances
+    avg_follower_norm = pd.concat(follower_norms, axis=1).mean(axis=1)
+    
+    # Negative space = leader normalized performance - average follower normalized performance
+    negative_space = leader_norm - avg_follower_norm
+    
+    return negative_space, leader_norm, avg_follower_norm
 
-            # filter to requested window
-            df_t = df_t.loc[(df_t.index >= start) & (df_t.index <= end)]
-            dfs[t] = df_t
-    else:
-        # single-ticker response
-        try:
-            if not pd.api.types.is_datetime64_any_dtype(df.index):
-                dt_index = pd.to_datetime(df.index, errors="coerce")
+def calculate_roc(series, window):
+    """Calculate Rate of Change"""
+    return series.pct_change(window) * 100
+
+def identify_phases(negative_space, roc_neg_space, acc_neg_space):
+    """Identify trading phases based on negative space dynamics"""
+    phases = []
+    
+    for i in range(len(negative_space)):
+        if pd.isna(roc_neg_space.iloc[i]) or pd.isna(acc_neg_space.iloc[i]):
+            phases.append("Inactive")
+        elif roc_neg_space.iloc[i] > 0 and negative_space.iloc[i] > 0:
+            # Negative space is positive and increasing (leader pulling away)
+            phases.append("Initiation")
+        elif roc_neg_space.iloc[i] < 0 and acc_neg_space.iloc[i] < 0:
+            # Negative space is shrinking and acceleration is negative (early convergence)
+            phases.append("Early Inflection")
+        elif roc_neg_space.iloc[i] < 0 and acc_neg_space.iloc[i] >= 0:
+            # Negative space still shrinking but deceleration starting
+            phases.append("Mid Inflection")
+        elif roc_neg_space.iloc[i] >= 0 and negative_space.iloc[i] < 0:
+            # Negative space stopped shrinking, followers caught up
+            phases.append("Late Inflection")
+        elif roc_neg_space.iloc[i] > 0 and negative_space.iloc[i] > 0:
+            # Divergence resuming
+            phases.append("Interruption")
+        else:
+            phases.append("Inactive")
+    
+    return phases
+
+def backtest_strategy(data, phases, starting_balance):
+    """Backtest the trading strategy using actual prices but normalized analysis"""
+    symbols = data.columns.tolist()
+    leader = 'NVDA'
+    followers = [s for s in symbols if s != leader]
+    
+    balance = starting_balance
+    shares = {symbol: 0 for symbol in symbols}
+    portfolio_values = []
+    trades = []
+    in_position = False
+    
+    for i, (date, row) in enumerate(data.iterrows()):
+        phase = phases[i]
+        current_prices = row.to_dict()
+        
+        # Calculate current portfolio value using actual prices
+        portfolio_value = balance + sum(shares[symbol] * current_prices[symbol] for symbol in symbols)
+        portfolio_values.append(portfolio_value)
+        
+        # Trading logic
+        if phase == "Early Inflection" and not in_position and balance > 0:
+            # Enter position - equal weight allocation using actual prices
+            allocation_per_stock = balance / len(symbols)
+            for symbol in symbols:
+                if current_prices[symbol] > 0:
+                    shares[symbol] = allocation_per_stock / current_prices[symbol]
+            
+            trades.append({
+                'date': date,
+                'action': 'BUY',
+                'phase': phase,
+                'balance_before': balance,
+                'allocation_per_stock': allocation_per_stock,
+                'prices': current_prices.copy(),
+                'shares': shares.copy()
+            })
+            
+            balance = 0
+            in_position = True
+            
+        elif phase in ["Late Inflection", "Interruption"] and in_position:
+            # Exit position - sell all shares using actual prices
+            balance = sum(shares[symbol] * current_prices[symbol] for symbol in symbols)
+            
+            trades.append({
+                'date': date,
+                'action': 'SELL',
+                'phase': phase,
+                'balance_after': balance,
+                'prices': current_prices.copy(),
+                'shares_sold': shares.copy()
+            })
+            
+            shares = {symbol: 0 for symbol in symbols}
+            in_position = False
+    
+    return portfolio_values, trades
+
+# Main app
+if st.button("Run Backtest") or 'data' not in st.session_state:
+    with st.spinner("Fetching stock data..."):
+        symbols = ['NVDA', 'AMD', 'MRVL', 'ASML']
+        data = fetch_stock_data(symbols, start_date, end_date)
+        
+        if data is not None:
+            st.session_state.data = data
+            st.session_state.symbols = symbols
+        else:
+            st.error("Failed to fetch stock data. Please check your internet connection and try again.")
+            st.stop()
+
+if 'data' in st.session_state:
+    data = st.session_state.data
+    symbols = st.session_state.symbols
+    
+    # Calculate normalized metrics
+    leader_prices = data['NVDA']
+    follower_prices = data[['AMD', 'MRVL', 'ASML']]
+    
+    # Get normalized data and negative space
+    negative_space, leader_norm, avg_follower_norm = calculate_negative_space(leader_prices, follower_prices)
+    roc_neg_space = calculate_roc(negative_space, roc_window)
+    acc_neg_space = calculate_roc(roc_neg_space, roc_window)
+    
+    phases = identify_phases(negative_space, roc_neg_space, acc_neg_space)
+    
+    # Run backtest
+    portfolio_values, trades = backtest_strategy(data, phases, starting_balance)
+    
+    # Create normalized price data for all stocks for visualization
+    normalized_data = pd.DataFrame()
+    for symbol in symbols:
+        normalized_data[symbol] = normalize_prices(data[symbol])
+    
+    # Create results dataframe
+    results_df = pd.DataFrame({
+        'Date': data.index,
+        'Phase': phases,
+        'NVDA_Normalized': leader_norm.values,
+        'Followers_Avg_Normalized': avg_follower_norm.values,
+        'Negative_Space': negative_space.values,
+        'ROC_Negative_Space': roc_neg_space.values,
+        'ACC_Negative_Space': acc_neg_space.values,
+        'Portfolio_Value': portfolio_values
+    })
+    
+    # Performance metrics
+    final_value = portfolio_values[-1]
+    total_return = (final_value - starting_balance) / starting_balance * 100
+    
+    # Display results
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Starting Balance", f"${starting_balance:,.2f}")
+    with col2:
+        st.metric("Final Value", f"${final_value:,.2f}")
+    with col3:
+        st.metric("Total Return", f"{total_return:.1f}%")
+    with col4:
+        st.metric("Profit/Loss", f"${final_value - starting_balance:,.2f}")
+    
+    # Create visualizations
+    fig = make_subplots(
+        rows=4, cols=1,
+        subplot_titles=['Normalized Stock Prices (% from Start)', 'Leader vs Followers (Normalized)', 'Negative Space & ROC', 'Portfolio Value'],
+        vertical_spacing=0.08,
+        specs=[[{"secondary_y": False}],
+               [{"secondary_y": False}],
+               [{"secondary_y": True}],
+               [{"secondary_y": False}]]
+    )
+    
+    # Normalized stock prices for comparison
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+    for i, symbol in enumerate(symbols):
+        fig.add_trace(
+            go.Scatter(x=data.index, y=normalized_data[symbol], name=f'{symbol} (Normalized)', 
+                      line=dict(width=2, color=colors[i])),
+            row=1, col=1
+        )
+    
+    # Leader vs average followers (normalized)
+    fig.add_trace(
+        go.Scatter(x=data.index, y=leader_norm, name='NVDA (Normalized)', 
+                  line=dict(color='blue', width=3)),
+        row=2, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=data.index, y=avg_follower_norm, name='Followers Avg (Normalized)', 
+                  line=dict(color='orange', width=3)),
+        row=2, col=1
+    )
+    
+    # Negative space and ROC
+    fig.add_trace(
+        go.Scatter(x=data.index, y=negative_space, name='Negative Space', 
+                  line=dict(color='red', width=2)),
+        row=3, col=1
+    )
+    fig.add_trace(
+        go.Scatter(x=data.index, y=roc_neg_space, name='ROC Negative Space', 
+                  line=dict(color='purple', width=2)),
+        row=3, col=1, secondary_y=True
+    )
+    fig.add_hline(y=0, line_dash="dash", line_color="gray", row=3, col=1)
+    
+    # Portfolio value
+    fig.add_trace(
+        go.Scatter(x=data.index, y=portfolio_values, name='Portfolio Value', 
+                  line=dict(color='green', width=3)),
+        row=4, col=1
+    )
+    fig.add_hline(y=starting_balance, line_dash="dash", line_color="gray", row=4, col=1)
+    
+    # Add trade markers
+    for trade in trades:
+        color = 'green' if trade['action'] == 'BUY' else 'red'
+        symbol_marker = 'triangle-up' if trade['action'] == 'BUY' else 'triangle-down'
+        
+        # Get the corresponding y-values for each chart at the trade date
+        trade_idx = data.index.get_loc(trade['date'])
+        
+        y_values = [
+            normalized_data.iloc[trade_idx].mean(),  # Average normalized price
+            (leader_norm.iloc[trade_idx] + avg_follower_norm.iloc[trade_idx]) / 2,  # Average of leader and followers
+            negative_space.iloc[trade_idx],  # Negative space value
+            portfolio_values[trade_idx]  # Portfolio value
+        ]
+        
+        for row_idx, y_val in enumerate(y_values, 1):
+            fig.add_trace(
+                go.Scatter(x=[trade['date']], y=[y_val], mode='markers',
+                          marker=dict(color=color, size=15, symbol=symbol_marker),
+                          name=f"{trade['action']} - {trade['phase']}", 
+                          showlegend=(row_idx == 1)),
+                row=row_idx, col=1
+            )
+    
+    fig.update_layout(height=900, title_text="Leader-Follower Strategy Analysis (Normalized)")
+    
+    # Update axis labels
+    fig.update_xaxes(title_text="Date", row=4, col=1)
+    fig.update_yaxes(title_text="% Change from Start", row=1, col=1)
+    fig.update_yaxes(title_text="% Change from Start", row=2, col=1)
+    fig.update_yaxes(title_text="Negative Space (%)", row=3, col=1)
+    fig.update_yaxes(title_text="ROC (%)", row=3, col=1, secondary_y=True)
+    fig.update_yaxes(title_text="Portfolio Value ($)", row=4, col=1)
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # Phase distribution
+    st.subheader("Phase Distribution")
+    phase_counts = pd.Series(phases).value_counts()
+    phase_colors = {
+        'Inactive': '#gray',
+        'Initiation': '#yellow', 
+        'Early Inflection': '#green',
+        'Mid Inflection': '#blue',
+        'Late Inflection': '#orange',
+        'Interruption': '#red'
+    }
+    colors_list = [phase_colors.get(phase, '#gray') for phase in phase_counts.index]
+    
+    fig_phases = go.Figure(data=[go.Bar(
+        x=phase_counts.index, 
+        y=phase_counts.values,
+        marker_color=colors_list
+    )])
+    fig_phases.update_layout(title="Trading Phase Distribution", xaxis_title="Phase", yaxis_title="Days")
+    st.plotly_chart(fig_phases, use_container_width=True)
+    
+    # Trading history
+    st.subheader("Trading History")
+    if trades:
+        # Create a more readable trades dataframe
+        trades_display = []
+        for trade in trades:
+            trade_info = {
+                'Date': trade['date'].strftime('%Y-%m-%d'),
+                'Action': trade['action'],
+                'Phase': trade['phase'],
+            }
+            
+            if trade['action'] == 'BUY':
+                trade_info['Balance Before'] = f"${trade['balance_before']:,.2f}"
+                trade_info['Allocation per Stock'] = f"${trade['allocation_per_stock']:,.2f}"
+                for symbol in symbols:
+                    trade_info[f'{symbol} Price'] = f"${trade['prices'][symbol]:.2f}"
+                    trade_info[f'{symbol} Shares'] = f"{trade['shares'][symbol]:.4f}"
             else:
-                dt_index = df.index
-            if getattr(dt_index, "tz", None) is not None:
-                dt_index = dt_index.tz_convert(None) if hasattr(dt_index, "tz_convert") else dt_index.tz_localize(None)
-            df = df.assign(_dt_index=dt_index)
-            df = df.dropna(subset=["_dt_index"])
-            df.index = df["_dt_index"]
-            df = df.drop(columns=["_dt_index"])
-            df = df.loc[(df.index >= start) & (df.index <= end)]
-        except Exception as e:
-            st.warning(f"Date parsing issue for single ticker response: {e}")
-            df = pd.DataFrame()
-        dfs[tickers[0]] = df
-
-    return dfs
-
-# ----------------------------
-# Helper: fetch FRED series (cached)
-# ----------------------------
-def fetch_fred_series(series_id, start=None, end=None, fred_client=None):
-    fred_client = fred_client or Fred(api_key=FRED_API_KEY)
-    cache_path = os.path.join(CACHE_DIR, f"{series_id}.csv")
-    if os.path.exists(cache_path):
-        try:
-            s = pd.read_csv(cache_path, parse_dates=["date"], index_col="date")["value"]
-            if start:
-                s = s[s.index >= pd.to_datetime(start)]
-            if end:
-                s = s[s.index <= pd.to_datetime(end)]
-            return s
-        except Exception:
-            pass
-    # fallback to live fetch
-    s = fred_client.get_series(series_id)
-    s.index = pd.to_datetime(s.index)
-    s = s.rename(series_id)
-    s.to_csv(cache_path, header=["value"])
-    if start:
-        s = s[s.index >= pd.to_datetime(start)]
-    if end:
-        s = s[s.index <= pd.to_datetime(end)]
-    return s
-
-# ----------------------------
-# Compute combined rate series
-# ----------------------------
-def compute_combined_rate_series(zq_df, sofr_series, sofr_window_days=30):
-    """Return DataFrame with columns: sofr, sofr_avg, implied_rate, combined_rate (daily)."""
-    # require 'close' column on zq_df
-    if zq_df is None or zq_df.empty or "close" not in zq_df.columns:
-        return pd.DataFrame()
-
-    # ZQ implied rate = 100 - close price (daily)
-    zq_daily = zq_df["close"].resample("D").last().dropna()
-    implied_rate = 100.0 - zq_daily
-    # SOFR: fill to daily and compute rolling avg
-    sofr = sofr_series.copy()
-    sofr = sofr.resample("D").ffill()
-    df = pd.DataFrame({"implied_rate": implied_rate}).join(sofr.rename("sofr"), how="inner")
-    df["sofr_avg"] = df["sofr"].rolling(window=sofr_window_days, min_periods=1).mean()
-    df["combined_rate"] = (df["implied_rate"] + df["sofr_avg"]) / 2.0
-    return df.dropna()
-
-# ----------------------------
-# Entries using 35th percentile (historical)
-# ----------------------------
-def find_entries_by_percentile(combined_df, percentile=35.0):
-    """Return percentile_value and DataFrame of entry dates where combined_rate < percentile_value."""
-    if combined_df is None or combined_df.empty:
-        return None, pd.DataFrame()
-    pct_val = np.percentile(combined_df["combined_rate"].values, percentile)
-    entries = combined_df[combined_df["combined_rate"] < pct_val].copy()
-    return float(pct_val), entries
-
-# ----------------------------
-# Compute returns for entries (gold & silver)
-# ----------------------------
-def compute_entry_returns(entries_df, gold_df, silver_df, holding_days=14):
-    results = []
-    for entry_date in entries_df.index:
-        buy = entry_date
-        sell = buy + pd.Timedelta(days=holding_days)
-        g_slice = gold_df.loc[buy:sell]
-        s_slice = silver_df.loc[buy:sell]
-        if g_slice.empty or s_slice.empty:
-            continue
-        try:
-            g_entry = g_slice["close"].iloc[0]; g_exit = g_slice["close"].iloc[-1]
-            s_entry = s_slice["close"].iloc[0]; s_exit = s_slice["close"].iloc[-1]
-        except Exception:
-            continue
-        results.append({
-            "entry_date": buy,
-            "sell_date": sell,
-            "ret_gold": (g_exit / g_entry) - 1.0,
-            "ret_silver": (s_exit / s_entry) - 1.0,
-            "entry_gold": g_entry, "exit_gold": g_exit,
-            "entry_silver": s_entry, "exit_silver": s_exit
-        })
-    if not results:
-        return pd.DataFrame()
-    df = pd.DataFrame(results).set_index("entry_date")
-    df["avg_ret"] = df[["ret_gold", "ret_silver"]].mean(axis=1)
-    return df
-
-# ----------------------------
-# Streamlit UI: sidebar controls
-# ----------------------------
-st.sidebar.header("Settings")
-fred_key_input = st.sidebar.text_input("FRED API Key (or set FRED_API_KEY env var)", value=FRED_API_KEY)
-if fred_key_input:
-    FRED_API_KEY = fred_key_input.strip()
-
-sofr_window = st.sidebar.number_input("SOFR rolling window (days)", value=30, min_value=1, max_value=180)
-holding_days = st.sidebar.number_input("Holding days after entry", value=14, min_value=1, max_value=90)
-refresh = st.sidebar.button("Refresh Data (clear cache)")
-
-st.markdown(f"**Data Range (fixed):** {START_DATE.date()} → {END_DATE.date()}")
-st.info("This dashboard computes the 35th percentile on the full historical combined-rate series and uses it as the entry filter.")
-
-# require FRED key
-if not FRED_API_KEY or len(FRED_API_KEY) != 32:
-    st.error("Please provide a valid 32-character FRED API key (sidebar or env var).")
-    st.stop()
-
-# ----------------------------
-# Load data (with caching & optional refresh)
-# ----------------------------
-if refresh:
-    # clear cached data by bumping cache keys: easiest is to remove cache files
-    for f in os.listdir(CACHE_DIR):
-        try:
-            os.remove(os.path.join(CACHE_DIR, f))
-        except Exception:
-            pass
-    st.experimental_rerun()
-
-# fetch prices
-tickers = ["ZQ=F", "GC=F", "SI=F"]
-dfs = fetch_yahooquery_data(tickers, START_DATE, END_DATE + dt.timedelta(days=30))  # gold/silver extra days for forward returns
-zq_df = dfs.get("ZQ=F", pd.DataFrame())
-gold_df = dfs.get("GC=F", pd.DataFrame())
-silver_df = dfs.get("SI=F", pd.DataFrame())
-
-# debug columns
-st.write("ZQ=F columns:", list(zq_df.columns) if not zq_df.empty else "empty")
-st.write("GC=F columns:", list(gold_df.columns) if not gold_df.empty else "empty")
-st.write("SI=F columns:", list(silver_df.columns) if not silver_df.empty else "empty")
-
-# fetch FRED series
-fred_client = Fred(api_key=FRED_API_KEY)
-try:
-    sofr_series = fetch_fred_series("SOFR", start=START_DATE, end=END_DATE, fred_client=fred_client)
-except Exception as e:
-    st.error(f"Error fetching SOFR from FRED: {e}")
-    sofr_series = pd.Series(dtype=float)
-
-# ----------------------------
-# Compute combined series & percentile filter
-# ----------------------------
-combined_df = compute_combined_rate_series(zq_df, sofr_series, sofr_window_days=sofr_window)
-if combined_df.empty:
-    st.error("Combined rate series is empty — check ZQ=F and SOFR data.")
-    st.stop()
-
-pct35_value, entries_df = find_entries_by_percentile(combined_df, percentile=35.0)
-st.write(f"Historic 35th percentile of combined_rate = {pct35_value:.6f}")
-
-# ----------------------------
-# Compute returns for entries
-# ----------------------------
-entries_returns = compute_entry_returns(entries_df, gold_df, silver_df, holding_days=holding_days)
-if not entries_returns.empty:
-    avg_entry_return = entries_returns["avg_ret"].mean()
-    compounded = (1 + entries_returns["avg_ret"]).prod() - 1
-else:
-    avg_entry_return = np.nan
-    compounded = np.nan
-
-# ----------------------------
-# Dashboard panels
-# ----------------------------
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.subheader("Combined Rate (implied ZQ vs SOFR avg)")
-    st.line_chart(combined_df[["implied_rate", "sofr_avg", "combined_rate"]])
-
-    st.markdown(f"**Historical 35th percentile threshold:** {pct35_value:.6f}")
-    st.write("Entries are days where combined_rate < 35th percentile (filtering logic).")
-    st.dataframe(entries_df[["combined_rate"]].assign(threshold=pct35_value).head(10))
-
-with col2:
-    st.subheader("Entry Statistics")
-    st.metric("Number of entries", len(entries_df))
-    st.metric("Avg entry return (gold+silver avg)", f"{avg_entry_return:.4%}" if not np.isnan(avg_entry_return) else "N/A")
-    st.metric("Compounded return across entries", f"{compounded:.4%}" if not np.isnan(compounded) else "N/A")
-
-# Entry navigator and charting
-if entries_df.empty:
-    st.info("No entries found using the 35th-percentile filter in the selected historical window.")
-else:
-    if "entry_idx" not in st.session_state:
-        st.session_state["entry_idx"] = 0
-
-    entry_dates = list(entries_df.index)
-    coln1, coln2, coln3 = st.columns([1, 1, 2])
-    with coln1:
-        if st.button("Prev"):
-            st.session_state["entry_idx"] = max(0, st.session_state["entry_idx"] - 1)
-    with coln2:
-        if st.button("Next"):
-            st.session_state["entry_idx"] = min(len(entry_dates) - 1, st.session_state["entry_idx"] + 1)
-    with coln3:
-        st.number_input("Go to entry index", min_value=0, max_value=len(entry_dates) - 1, key="entry_idx_input",
-                        value=st.session_state["entry_idx"], on_change=lambda: st.session_state.update({"entry_idx": st.session_state["entry_idx_input"]}))
-
-    idx = st.session_state["entry_idx"]
-    sel_date = entry_dates[idx]
-    st.markdown(f"### Entry {idx+1}/{len(entry_dates)} — {sel_date.date()} (combined_rate={entries_df.loc[sel_date,'combined_rate']:.6f})")
-
-    buy = sel_date
-    sell = buy + pd.Timedelta(days=holding_days)
-    g_slice = gold_df.loc[buy:sell]
-    s_slice = silver_df.loc[buy:sell]
-
-    st.subheader(f"Gold & Silver from {buy.date()} to {sell.date()}")
-    if g_slice.empty or s_slice.empty:
-        st.warning("No gold/silver price data available for this entry's forward window.")
+                trade_info['Balance After'] = f"${trade['balance_after']:,.2f}"
+                for symbol in symbols:
+                    trade_info[f'{symbol} Price'] = f"${trade['prices'][symbol]:.2f}"
+                    trade_info[f'{symbol} Shares Sold'] = f"{trade['shares_sold'][symbol]:.4f}"
+            
+            trades_display.append(trade_info)
+        
+        trades_df = pd.DataFrame(trades_display)
+        st.dataframe(trades_df, use_container_width=True)
     else:
-        st.line_chart(g_slice["close"], use_container_width=True)
-        st.line_chart(s_slice["close"], use_container_width=True)
+        st.info("No trades were executed during this period.")
+    
+    # Performance comparison
+    st.subheader("Performance Comparison")
+    
+    # Buy and hold comparison
+    buy_hold_values = []
+    initial_shares_bh = {symbol: (starting_balance / len(symbols)) / data[symbol].iloc[0] for symbol in symbols}
+    
+    for i, (date, row) in enumerate(data.iterrows()):
+        bh_value = sum(initial_shares_bh[symbol] * row[symbol] for symbol in symbols)
+        buy_hold_values.append(bh_value)
+    
+    bh_return = (buy_hold_values[-1] - starting_balance) / starting_balance * 100
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Strategy Return", f"{total_return:.1f}%")
+    with col2:
+        st.metric("Buy & Hold Return", f"{bh_return:.1f}%")
+    
+    # Detailed results
+    st.subheader("Detailed Results")
+    # Add buy and hold comparison to results
+    results_df['Buy_Hold_Value'] = buy_hold_values
+    st.dataframe(results_df.round(4), use_container_width=True)
+    
+    # Download results
+    csv = results_df.to_csv(index=False)
+    st.download_button(
+        label="Download Results as CSV",
+        data=csv,
+        file_name=f"leader_follower_backtest_{start_date}_{end_date}.csv",
+        mime="text/csv"
+    )
 
-# CSV downloads
-st.markdown("---")
-st.download_button("Download combined_df CSV", data=combined_df.to_csv().encode("utf-8"), file_name="combined_rates.csv", mime="text/csv")
-if not entries_returns.empty:
-    st.download_button("Download entries returns CSV", data=entries_returns.to_csv().encode("utf-8"), file_name="entries_returns.csv", mime="text/csv")
-else:
-    st.info("No entries/returns CSV to download (no entries found).")
+# Strategy explanation
+with st.expander("Strategy Explanation"):
+    st.markdown("""
+    ### Leader-Follower Trading Strategy (Normalized Analysis)
+    
+    **Core Concept**: This strategy identifies wave-like patterns in sector movements by analyzing the relationship between a sector leader (NVDA) and its followers (AMD, MRVL, ASML) using normalized price data.
+    
+    **Normalization**: All stock prices are normalized to percentage returns from the starting date to ensure fair comparison regardless of absolute price levels.
+    
+    **Key Metrics**:
+    - **Normalized Prices**: All stock prices converted to % change from the first day
+    - **Negative Space**: The performance gap between the normalized leader and average normalized follower performance
+    - **ROC Negative Space**: Rate of change in the negative space (momentum)
+    - **ACC Negative Space**: Acceleration of the negative space change
+    
+    **Trading Phases**:
+    1. **Inactive**: No clear trend, stay in cash
+    2. **Initiation**: Leader starts outperforming, but followers haven't caught up yet
+    3. **Early Inflection**: Followers start catching up, negative space shrinking (BUY signal)
+    4. **Mid Inflection**: Continued convergence, hold positions
+    5. **Late Inflection**: Convergence slowing down (SELL signal)
+    6. **Interruption**: Divergence resuming, avoid positions
+    
+    **Entry**: Buy all stocks with equal weight when "Early Inflection" is detected
+    **Exit**: Sell all positions when "Late Inflection" or "Interruption" is detected
+    
+    **Important**: While analysis uses normalized data for signal generation, actual trading uses real prices for position sizing and profit calculation.
+    """)
