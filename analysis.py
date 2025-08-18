@@ -1,4 +1,4 @@
-# streamlit_yahoo_json_parse.py
+# streamlit_yahoo_json_log.py
 
 import streamlit as st
 import requests
@@ -8,10 +8,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 import json
 import re
+import queue
 
-# Shared counter for progress
+# Shared variables
 completed_chunks = 0
 lock = threading.Lock()
+log_queue = queue.Queue()
 
 hdr = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/71.0.3578.98 Safari/537.36"
@@ -29,17 +31,11 @@ def call_url(url):
     return r.text
 
 def extract_symbols_from_body(body):
-    """
-    Extract tickers from embedded JSON in Yahoo Finance page
-    """
     symbols = set()
-    # Find the script containing root.App.main
     match = re.search(r'root\.App\.main\s*=\s*({.*});', body)
     if not match:
         return symbols
-
     data = json.loads(match.group(1))
-    # Navigate to quotes array
     try:
         quotes = data['context']['dispatcher']['stores']['QuoteLookupStore']['quotes']
         for q in quotes:
@@ -51,12 +47,10 @@ def extract_symbols_from_body(body):
     return symbols
 
 def process_block(search_term):
-    """
-    Process one search term with block pagination
-    """
     yh_all_sym = set()
     for block in range(0, 9999, 100):
         url = f"https://finance.yahoo.com/lookup/equity?s={search_term}&t=A&b={block}&c=100"
+        log_queue.put(f"Processing {search_term} block {block}")
         body = call_url(url)
         symbols = extract_symbols_from_body(body)
         if not symbols:
@@ -73,23 +67,19 @@ def scrape_prefix_batch(prefix_chunk):
             symbols = process_block(search_term)
             yh_all_sym.update(symbols)
 
-            # Triple-letter expansion if needed
-            if len(symbols) >= 100:  # If maxed out, expand
+            if len(symbols) >= 100:  # expand triple if needed
                 for term_3 in prefix_chunk:
                     search_term3 = search_term + term_3
                     symbols3 = process_block(search_term3)
                     yh_all_sym.update(symbols3)
-
                     if len(symbols3) >= 100:
                         for term_4 in prefix_chunk:
                             search_term4 = search_term3 + term_4
                             symbols4 = process_block(search_term4)
                             yh_all_sym.update(symbols4)
 
-    # Update progress
     with lock:
         completed_chunks += 1
-
     return yh_all_sym
 
 def chunk_list(lst, n):
@@ -103,34 +93,45 @@ def threaded_scrape():
 
     search_set = [chr(x) for x in range(65, 91)] + [chr(x) for x in range(48, 58)]
     chunks = chunk_list(search_set, 5)
-
     all_symbols = set()
     total_chunks = len(chunks)
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = [executor.submit(scrape_prefix_batch, chunk) for chunk in chunks]
 
-        # Progress bar in main thread
+        # Streamlit elements
         progress_bar = st.progress(0.0)
+        log_area = st.empty()
+
+        logs = []
         while completed_chunks < total_chunks:
+            # Update progress
             progress_bar.progress(completed_chunks / total_chunks)
+            # Update logs
+            while not log_queue.empty():
+                log_msg = log_queue.get()
+                logs.append(log_msg)
+            log_area.text("\n".join(logs[-20:]))  # show last 20 logs
             time.sleep(0.5)
 
-        # Wait for all futures to finish
         for f in as_completed(futures):
             all_symbols.update(f.result())
+
         progress_bar.progress(1.0)
+        # Final log update
+        while not log_queue.empty():
+            logs.append(log_queue.get())
+        log_area.text("\n".join(logs[-50:]))
 
     return sorted(list(all_symbols))
 
 def main():
-    st.title("Yahoo Finance Ticker Scraper (JSON Embedded)")
+    st.title("Yahoo Finance Ticker Scraper (JSON + Logging)")
 
     if st.button("Start Scraping"):
         st.write("Scraping in progress...")
         tickers = threaded_scrape()
         st.success(f"Scraping complete! Found {len(tickers)} symbols.")
-
         st.dataframe(tickers)
 
         content = "\n".join(tickers)
