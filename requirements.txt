@@ -33,5 +33,5 @@ numpy>=1.26
 requests>=2.32
 sqlalchemy>=2.0
 pymysql
-yahoo_finance_stock_symbols_scraper
+
 
