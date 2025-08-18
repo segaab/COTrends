@@ -1,10 +1,15 @@
-# streamlit_app_threaded.py
+# streamlit_app_threaded_progress.py
 
 import streamlit as st
 import requests
 import time
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
+
+# Shared progress counter
+completed_chunks = 0
+lock = threading.Lock()
 
 hdr = {
     "authority": "finance.yahoo.com",
@@ -38,8 +43,7 @@ def get_counts(body, srch):
     count_beg = body.find('Stocks (')
     rest = body[count_beg+8: count_beg+20]
     count_end = rest.find(')')
-    count_all = rest[0: count_end]
-    return int(count_all)
+    return int(rest[:count_end])
 
 def process_block(body, srch, yh_all_sym):
     for block in range(0, 9999, 100):
@@ -57,7 +61,8 @@ def process_block(body, srch, yh_all_sym):
         if is_empty:
             break
 
-def scrape_prefix_batch(search_set_chunk, progress_callback=None):
+def scrape_prefix_batch(search_set_chunk):
+    global completed_chunks
     yh_all_sym = set()
     for term_1 in search_set_chunk:
         for term_2 in search_set_chunk:
@@ -81,8 +86,10 @@ def scrape_prefix_batch(search_set_chunk, progress_callback=None):
                         for term_4 in search_set_chunk:
                             process_block(body3, search_term3 + term_4, yh_all_sym)
 
-        if progress_callback:
-            progress_callback()
+    # Update progress safely
+    with lock:
+        completed_chunks += 1
+
     return yh_all_sym
 
 def chunk_list(lst, n):
@@ -91,27 +98,32 @@ def chunk_list(lst, n):
 
 @st.cache_data(show_spinner=False)
 def threaded_scrape():
+    global completed_chunks
+    completed_chunks = 0
+
     search_set = [chr(x) for x in range(65, 91)] + [chr(x) for x in range(48, 58)]
-    chunks = chunk_list(search_set, 5)  # 5 threads
+    chunks = chunk_list(search_set, 5)
 
     yh_all_symbols = set()
-    progress_bar = st.progress(0.0)
-    completed = 0
-
-    def update_progress():
-        nonlocal completed
-        completed += 1
-        progress_bar.progress(completed / 5.0)
+    total_chunks = len(chunks)
 
     with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [executor.submit(scrape_prefix_batch, chunk, update_progress) for chunk in chunks]
+        futures = [executor.submit(scrape_prefix_batch, chunk) for chunk in chunks]
+
+        # Update progress bar in main thread
+        progress_bar = st.progress(0.0)
+        while completed_chunks < total_chunks:
+            progress_bar.progress(completed_chunks / total_chunks)
+            time.sleep(1)  # check every 1 sec
+        # Ensure all threads are done
         for f in as_completed(futures):
             yh_all_symbols.update(f.result())
+        progress_bar.progress(1.0)
 
     return sorted(list(yh_all_symbols))
 
 def main():
-    st.title("Yahoo Finance Ticker Scraper (Threaded + Batched)")
+    st.title("Yahoo Finance Ticker Scraper (Threaded + Progress)")
 
     if st.button("Start Scraping"):
         st.write("Scraping in progress...")
