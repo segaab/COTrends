@@ -1,303 +1,214 @@
-import os
-import base64
 import streamlit as st
-import streamlit.components.v1 as components
-from sodapy import Socrata
-from datetime import datetime
 import pandas as pd
-import altair as alt
+import numpy as np
+from yahooquery import Ticker
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+from datetime import datetime
+import warnings
 
-# THIS MUST BE THE FIRST STREAMLIT COMMAND
+warnings.filterwarnings('ignore')
+
 st.set_page_config(
-    layout="wide",
-    page_title="COTrend Analysis",
-    page_icon="📊"
+    page_title="Sector Wave & Negative Space Dashboard",
+    page_icon="📊",
+    layout="wide"
 )
 
-# Import the actual implementations from their respective files
-from data_fetcher import get_last_two_reports
-from analysis import aggregate_report_data, analyze_change, analyze_positions
-from feedback_form import render_feature_form
+st.title("📊 Sector Wave & Negative Space Dashboard")
 
-# Cache for the report data
-@st.cache_data(ttl=3600)  # Cache for 1 hour
-def fetch_cot_data(_client):  # Added underscore to tell Streamlit not to hash this parameter
-    """Fetch and cache COT report data"""
-    raw_data = get_last_two_reports(_client)
-    if not raw_data:
-        st.error("Failed to fetch COT report data")
-    return raw_data
+# -----------------------------
+# 1. Sector & Ticker Mapping
+# -----------------------------
+SECTORS = {
+    "Information Technology": {
+        "AI": ["NVDA", "AMD", "PLTR", "SMCI", "SNOW", "AVGO"],
+        "Cloud Computing": ["AMZN", "MSFT", "NET", "ORCL", "SMCI", "PLTR"],
+        "Cybersecurity": ["CRWD", "ZS", "FTNT", "CYBR", "FFIV", "AVGO"]
+    },
+    "Healthcare": {
+        "Telemedicine": ["TDOC", "DOCS", "AMWL", "PINC", "PHR", "IRTC"],
+        "Biotechnology": ["MRNA", "REGN", "VRTX", "BTAI", "TNXP", "SNGX"],
+        "Medical Devices": ["BSX", "MDT", "ABT", "SNN", "ZBH", "MASI"]
+    },
+    "Energy": {
+        "Renewable Energy": ["NEE", "FSLR", "BEP", "ENLT", "RNW", "CEG"],
+        "Energy Storage": ["STEM", "BE", "AEE", "CMS", "CEG", "ENPH"]
+    },
+    "Financials": {
+        "Fintech": ["SQ", "SOFI", "PYPL", "TW", "HOOD", "IBKR"]
+    },
+    "Consumer Discretionary": {
+        "E-commerce": ["AMZN", "SHOP", "WMT", "PYPL", "CVNA", "GRPN"],
+        "Electric Vehicles": ["TSLA", "BYDDY", "NIO", "VWAGY", "RIVN", "LCID"]
+    },
+    "Industrials": {
+        "Robotics & Automation": ["ISRG", "TXN", "ABB", "TER", "SYM", "PATH"],
+        "Aerospace Technology": ["BA", "LMT", "RTX", "GD", "TDY", "HII"]
+    },
+    "Materials": {
+        "Advanced Materials": ["EMN", "HTGC", "KMT", "RYAM", "HUN", "ASIX"],
+        "Nanotechnology": ["ZTEK", "NNOMF", "NNXPF", "ATOM", "AVAV", "ONTO"],
+        "Sustainable & Recycled Materials": ["EMN", "ECL", "SMG", "PKG", "WRK", "SEE"]
+    },
+    "Utilities": {
+        "Smart Grid Technology": ["ITRI", "GRID", "IPWR", "BMI", "HASI", "ARQ"],
+        "Renewable Electricity Integration": ["PEG", "NEE", "ED", "SO", "DUK", "ES"]
+    },
+    "Consumer Staples": {
+        "Sustainable & Organic Food": ["NSRGY", "TSN", "CLX", "MO", "OLLI", "COCO"],
+        "Household & Personal Care": ["PG", "CLX", "KMB", "UL", "CL", "EL"]
+    },
+    "Communication Services": {
+        "Social Media & Interactive Media": ["META", "SNAP", "PINS", "SPOT", "BILI", "TWTR"],
+        "Telecom Services": ["VZ", "T", "TMUS", "CMCSA", "DISH", "NOVN"]
+    },
+    "Real Estate": {
+        "Proptech & Real Estate Tech": ["Z", "OPEN", "RDFN", "AURUMPROP", "COMP", "DOC"],
+        "REITs (Retail & Industrial)": ["PLD", "AMT", "SPG", "PSA", "EQR", "DLR"]
+    },
+    "Basic Materials": {
+        "Chemicals & Specialty Chemicals": ["DOW", "LYB", "SHW", "HUN", "ECL", "PPG"],
+        "Metals & Mining": ["BHP", "RIO", "FCX", "NEM", "GOLD", "VALE"]
+    },
+    "Oil & Gas": {
+        "Major Integrated Oil Companies": ["XOM", "CVX", "COP", "SLB", "WMB", "EOG"],
+        "Oilfield Services & Equipment": ["SLB", "HAL", "BKR", "NOV", "FTI", "COS"],
+        "Canadian Oil & Gas": ["MEG", "FO", "ATH", "HWX", "CNQ", "SU"]
+    },
+    "Gold & Precious Metals": {
+        "Gold Mining": ["NEM", "GOLD", "KL", "AEM", "FNV", "ABX"],
+        "Precious Metals Streaming & Royalty": ["FNV", "WPM", "RGLD", "HL", "PAAS", "AUY"]
+    },
+    "Arms/Defense": ["LMT", "RTX", "BA", "HON", "GD", "NOC"],
+    "Cryptocurrency": ["COIN", "MSTR", "RIOT", "MARA", "BLOK", "CORE", "CLSK", "HUT", "HOOD", "TERA"]
+}
 
-def render_asset_section(assets, section_title, raw_data):
-    """Helper function to render asset sections consistently"""
-    st.markdown(f'<h2 class="section-header">{section_title}</h2>', unsafe_allow_html=True)
+# -----------------------------
+# 2. Sidebar
+# -----------------------------
+sector = st.sidebar.selectbox("Select Sector", list(SECTORS.keys()))
+subsector_list = list(SECTORS[sector].keys()) if isinstance(SECTORS[sector], dict) else [sector]
+subsector = st.sidebar.selectbox("Select Niche/Subsector", subsector_list)
+tickers = SECTORS[sector][subsector] if isinstance(SECTORS[sector], dict) else SECTORS[sector]
+leader = st.sidebar.selectbox("Select Leader", tickers)
+start_date = st.sidebar.date_input("Start Date", value=datetime(2023, 1, 1))
+end_date = st.sidebar.date_input("End Date", value=datetime(2024, 7, 1))
+
+roc_window = st.sidebar.slider("ROC Window (days)", min_value=5, max_value=30, value=14)
+neg_space_threshold = st.sidebar.slider("Negative Space Threshold", min_value=0.01, max_value=0.1, value=0.05, step=0.01)
+
+# -----------------------------
+# 3. Data Fetching
+# -----------------------------
+@st.cache_data
+def fetch_stock_data(symbols, start_date, end_date):
+    ticker = Ticker(symbols)
+    data = ticker.history(start=start_date, end=end_date, interval='1d')
     
-    if not raw_data:
-        st.error("No data available. Please try again later.")
-        return
-    
-    for asset in assets:
-        short_asset = asset.split(" -")[0]
-        with st.expander(short_asset):
-            try:
-                # Process the data using functions from analysis.py
-                asset_data = aggregate_report_data(raw_data, asset)
-                if asset_data.empty:
-                    st.warning(f"No data available for {asset}")
-                    continue
-                
-                # Analyze changes and positions
-                analytics_df = analyze_change(asset_data)
-                position_data = analyze_positions(asset_data)
+    if isinstance(data.index, pd.MultiIndex):
+        data = data.reset_index().pivot(index="date", columns="symbol", values="adjclose")
+    return data.fillna(method='ffill').dropna()
 
-                # Display the data
-                # Remove columns, use vertical layout
-                # Format the analytics DataFrame for display
-                display_df = analytics_df.copy()
-                display_df['Net Change %'] = display_df['change_in_net_pct'].apply(
-                    lambda x: f"{x:+.2f}%" if pd.notnull(x) else "N/A"
-                )
-                display_df = display_df[['group', 'Net Change %']].rename(
-                    columns={'group': 'Traders'}
-                )
-                # Show net change percentages with proper formatting
-                st.table(display_df)
+data = fetch_stock_data(tickers, start_date, end_date)
 
-                # Chart below the table, full width
-                st.write("Trader Positions Over Time (Normalized % Long)")
-                chart_df = asset_data.sort_values('report_date_as_yyyy_mm_dd').tail(3)
-                chart_df = chart_df.reset_index(drop=True)
-                week_labels = ['Before LW', 'Last Week', 'This Week']
-                chart_df['Week'] = week_labels[-len(chart_df):]
-                def pct_long(long, short):
-                    total = long + short
-                    return (long / total * 100) if total > 0 else 0
-                smart_money_pct = [pct_long(row['comm_positions_long_all'], row['comm_positions_short_all']) for _, row in chart_df.iterrows()]
-                large_spec_pct = [pct_long(row['noncomm_positions_long_all'], row['noncomm_positions_short_all']) for _, row in chart_df.iterrows()]
-                retail_pct = [pct_long(row['nonrept_positions_long_all'], row['nonrept_positions_short_all']) for _, row in chart_df.iterrows()]
-                plot_df = pd.DataFrame({
-                    'Week': chart_df['Week'],
-                    'Smart Money': smart_money_pct,
-                    'Large Speculators': large_spec_pct,
-                    'Retail': retail_pct
-                })
-                plot_df = plot_df.melt(id_vars=['Week'], var_name='Trader', value_name='Long %')
-                color_scale = alt.Scale(domain=["Smart Money", "Large Speculators", "Retail"],
-                                        range=["#3fa9f5", "#f25c5c", "#ffffff"])
-                line = alt.Chart(plot_df).mark_line(point=alt.OverlayMarkDef(filled=True, size=100)).encode(
-                    x=alt.X('Week', sort=None, axis=alt.Axis(title=None, labelFontSize=16)),
-                    y=alt.Y('Long %', axis=alt.Axis(title="% Long", labelFontSize=16), scale=alt.Scale(domain=[0, 100])),
-                    color=alt.Color('Trader', scale=color_scale, legend=alt.Legend(title="")),
-                    detail='Trader'
-                )
-                points = alt.Chart(plot_df).mark_point(filled=True, size=100).encode(
-                    x='Week',
-                    y='Long %',
-                    color=alt.Color('Trader', scale=color_scale, legend=None),
-                    shape=alt.Shape('Trader', legend=None)
-                )
-                chart = (line + points).properties(height=350, width=600, background="#343333")
-                st.altair_chart(chart, use_container_width=True)
-            except Exception as e:
-                st.error(f"Error displaying {asset}: {str(e)}")
+# -----------------------------
+# 4. Metrics & Phase Detection
+# -----------------------------
+def normalize_prices(prices):
+    return (prices / prices.iloc[0] - 1) * 100
 
-# Fixed image handling function
-def get_image_base64(image_path):
-    """Convert image to base64 string with error handling"""
-    try:
-        # Try to find the image in different possible locations
-        possible_paths = [
-            os.path.join(os.path.dirname(__file__)),  # Current directory
-            os.path.join(os.getcwd(), "assets"),     # Assets subdirectory
-            os.path.join(os.getcwd()),               # Root directory
-            "/app/streamlit-app/assets"              # Streamlit Cloud path
-        ]
-        
-        for base_dir in possible_paths:
-            full_path = os.path.join(base_dir, image_path)
-            if os.path.exists(full_path):
-                with open(full_path, "rb") as img_file:
-                    return base64.b64encode(img_file.read()).decode()
-        
-        raise FileNotFoundError(f"Image not found at any of the searched locations: {image_path}")
-    except Exception as e:
-        st.error(f"Error loading image: {str(e)}")
-        return ""
+def calculate_negative_space(leader_prices, follower_prices):
+    leader_norm = normalize_prices(leader_prices)
+    follower_norms = pd.concat([normalize_prices(follower_prices[c]) for c in follower_prices.columns], axis=1)
+    avg_follower_norm = follower_norms.mean(axis=1)
+    negative_space = leader_norm - avg_follower_norm
+    return negative_space, leader_norm, avg_follower_norm
 
-# Define Ko-fi button component
-def kofi_button():
-    kofi_html = """
-        <div style="display: flex; justify-content: center; margin-top: 1rem;">
-            <style>
-                .kofi-button {
-                    height: 54px;
-                    max-width: 100%;
-                    border: 0;
-                    border-radius: 8px;
-                    box-shadow: 0 2px 4px rgba(0,0,0,0.2);
-                    transition: transform 0.2s ease;
-                }
-                .kofi-button:hover {
-                    transform: translateY(-2px);
-                }
-                @media (max-width: 768px) {
-                    .kofi-button {
-                        height: 45px;
-                    }
-                }
-            </style>
-            <a href='https://ko-fi.com/Q5Q818G1MT' target='_blank'>
-                <img class='kofi-button'
-                     src='https://storage.ko-fi.com/cdn/kofi1.png?v=6' 
-                     alt='Buy Me a Coffee at ko-fi.com' />
-            </a>
-        </div>
-    """
-    return components.html(kofi_html, height=75)
+def calculate_roc(series, window):
+    return series.pct_change(window) * 100
 
-# Complete asset lists by categories with all instruments
-crypto = [
-    "BITCOIN - CHICAGO MERCANTILE EXCHANGE",
-    "MICRO BITCOIN - CHICAGO MERCANTILE EXCHANGE",
-    "MICRO ETHER - CHICAGO MERCANTILE EXCHANGE"
-]
+def identify_phases(negative_space, roc_neg_space, acc_neg_space):
+    phases = []
+    for i in range(len(negative_space)):
+        if pd.isna(roc_neg_space.iloc[i]) or pd.isna(acc_neg_space.iloc[i]):
+            phases.append("Inactive")
+        elif roc_neg_space.iloc[i] > 0 and negative_space.iloc[i] > 0:
+            phases.append("Initiation")
+        elif roc_neg_space.iloc[i] < 0 and acc_neg_space.iloc[i] < 0:
+            phases.append("Early Inflection")
+        elif roc_neg_space.iloc[i] < 0 and acc_neg_space.iloc[i] >= 0:
+            phases.append("Mid Inflection")
+        elif roc_neg_space.iloc[i] >= 0 and negative_space.iloc[i] < 0:
+            phases.append("Late Inflection")
+        elif roc_neg_space.iloc[i] > 0 and negative_space.iloc[i] > 0:
+            phases.append("Interruption")
+        else:
+            phases.append("Inactive")
+    return phases
 
-commodities = [
-    "GOLD - COMMODITY EXCHANGE INC.",
-    "SILVER - COMMODITY EXCHANGE INC.",
-    "WTI-FINANCIAL - NEW YORK MERCANTILE EXCHANGE"
-]
+leader_prices = data[leader]
+follower_prices = data[[c for c in tickers if c != leader]]
+negative_space, leader_norm, avg_follower_norm = calculate_negative_space(leader_prices, follower_prices)
+roc_neg_space = calculate_roc(negative_space, roc_window)
+acc_neg_space = calculate_roc(roc_neg_space, roc_window)
+phases = identify_phases(negative_space, roc_neg_space, acc_neg_space)
 
-forex = [
-    "JAPANESE YEN - CHICAGO MERCANTILE EXCHANGE",
-    "AUSTRALIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE",
-    "CANADIAN DOLLAR - CHICAGO MERCANTILE EXCHANGE",
-    "BRITISH POUND STERLING - CHICAGO MERCANTILE EXCHANGE",
-    "EURO FX - CHICAGO MERCANTILE EXCHANGE",
-    "U.S. DOLLAR INDEX - ICE FUTURES U.S.",
-    "NEW ZEALAND DOLLAR - CHICAGO MERCANTILE EXCHANGE",
-    "SWISS FRANC - CHICAGO MERCANTILE EXCHANGE"
-]
+# -----------------------------
+# 5. Main Display
+# -----------------------------
+st.subheader("Normalized Prices & Metrics")
+st.line_chart(pd.concat([leader_norm, avg_follower_norm], axis=1))
 
-indices = [
-    "DOW JONES REIT - CHICAGO BOARD OF TRADE",
-    "E-MINI S&P 500 STOCK INDEX - CHICAGO MERCANTILE EXCHANGE",
-    "NASDAQ-100 STOCK INDEX (MINI) - CHICAGO MERCANTILE EXCHANGE",
-    "NIKKEI STOCK AVERAGE - CHICAGO MERCANTILE EXCHANGE"
-]
+st.subheader("Negative Space & ROC")
+fig_neg = go.Figure()
+fig_neg.add_trace(go.Scatter(x=data.index, y=negative_space, name='Negative Space', line=dict(color='red')))
+fig_neg.add_trace(go.Scatter(x=data.index, y=roc_neg_space, name='ROC Negative Space', line=dict(color='purple')))
+st.plotly_chart(fig_neg, use_container_width=True)
 
-# Initialize Socrata client with error handling
-@st.cache_resource
-def init_client():
-    try:
-        MyAppToken = os.getenv('SODAPY_TOKEN')
-        if not MyAppToken:
-            st.error("Socrata API token not found. Please set SODAPY_TOKEN in your .env file.")
-            return None
-        
-        # Initialize client with correct domain
-        client = Socrata("publicreporting.cftc.gov", MyAppToken, timeout=30)
-        
-        # Test connection with a simple query to the correct endpoint
-        test_result = client.get("6dca-aqww", limit=1000)
-        if not test_result:
-            st.error("Failed to connect to CFTC API. Please check your API token and network connection.")
-            return None
-        return client
-    except Exception as e:
-        st.error(f"Failed to initialize Socrata client: {str(e)}")
-        return None
+st.subheader("Current Phase")
+st.markdown(f"**{phases[-1]}**")
 
-# Initialize client and fetch data once
-client = init_client()
-if client:
-    raw_data = fetch_cot_data(client)
-else:
-    raw_data = None
+# -----------------------------
+# 6. Dot Plot: Progression Toward Inflection
+# -----------------------------
+st.subheader("Stock Progression Toward Leader Inflection")
 
-# Add custom CSS for styling
-st.markdown("""
-    <style>
-    .header-container {
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        padding: 2rem;
-        background: linear-gradient(145deg, #2A2A2A, #1A1A1A);
-        border-radius: 16px;
-        margin-bottom: 2rem;
-    }
-    .logo-container {
-        width: 100%;
-        max-width: 400px;
-        padding: 1rem;
-        text-align: center;
-        margin-bottom: 1rem;
-    }
-    .banner-container {
-        width: 100%;
-        max-width: 400px;
-        text-align: center;
-        padding: 1rem;
-    }
-    .section-header {
-        color: #FFFFFF;
-        font-size: 1.75rem;
-        font-weight: 600;
-        margin: 2rem 0 1.5rem 0;
-        padding-bottom: 0.75rem;
-        border-bottom: 2px solid #404040;
-    }
-    .footer {
-        text-align: center;
-        padding: 2rem 0;
-        margin-top: 3rem;
-        border-top: 1px solid #404040;
-    }
-    .footer-text {
-        color: #808080;
-        font-size: 0.9rem;
-    }
-    </style>
-""", unsafe_allow_html=True)
+# Compute % progress: normalize follower vs leader max
+progress = pd.DataFrame({c: normalize_prices(data[c]) / normalize_prices(data[leader]).max() for c in tickers})
+latest_progress = progress.iloc[-1]
 
-# Header Component with error handling
-try:
-    logo_b64 = get_image_base64("assets/logo.png")
-    banner_b64 = get_image_base64("assets/banner.png")
-    
-    st.markdown(f"""
-        <div class="header-container">
-            <div class="logo-container">
-                <img src="data:image/png;base64,{logo_b64}" alt="COTrend Logo">
-            </div>
-            <div class="banner-container">
-                <img src="data:image/png;base64,{banner_b64}" alt="Find Your Edge">
-            </div>
-        </div>
-    """, unsafe_allow_html=True)
-except Exception as e:
-    st.error(f"Could not load header images: {str(e)}")
-    # Fallback header
-    st.title("COTrend Analysis")
-    st.subheader("Find Your Edge in the Commitments of Traders Reports")
+fig_dot = go.Figure()
+for stock in tickers:
+    fig_dot.add_trace(go.Scatter(
+        x=[stock],
+        y=[latest_progress[stock]],
+        mode='markers+lines',
+        name=stock,
+        line=dict(width=2),
+        marker=dict(size=12, color='blue'),
+        text=[f"Phase: {phases[-1]}<br>Progress: {latest_progress[stock]:.2f}"],
+        hoverinfo="text"
+    ))
 
-# Create two columns for layout
-col1, col2 = st.columns(2)
+fig_dot.update_layout(
+    yaxis_title="Progress to Leader Inflection",
+    xaxis_title="Stocks",
+    yaxis=dict(range=[0, 1]),
+    height=500
+)
+st.plotly_chart(fig_dot, use_container_width=True)
 
-# Display Crypto and Forex data
-with col1:
-    render_asset_section(crypto, "Crypto", raw_data)
-    render_asset_section(forex, "Forex", raw_data)
-
-# Display Commodities and Indices data
-with col2:
-    render_asset_section(commodities, "Commodities", raw_data)
-    render_asset_section(indices, "Indices", raw_data)
-
-# Add Footer
-st.markdown("""
-    <div class="footer">
-        <span class="footer-text">Powered by BiltP2P • Data from CFTC • Last updated: {}</span>
-    </div>
-    """.format(datetime.now().strftime("%Y-%m-%d")), unsafe_allow_html=True)
+# -----------------------------
+# 7. Download Metrics
+# -----------------------------
+metrics_df = pd.DataFrame({
+    "Date": data.index,
+    "Leader": leader_norm,
+    "Followers_Avg": avg_follower_norm,
+    "Negative_Space": negative_space,
+    "ROC_Negative_Space": roc_neg_space,
+    "ACC_Negative_Space": acc_neg_space,
+    "Phase": phases
+})
+st.download_button("Download Metrics CSV", metrics_df.to_csv(index=False), file_name=f"{sector}_{subsector}_metrics.csv")
