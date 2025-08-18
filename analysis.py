@@ -4,9 +4,10 @@ import pandas as pd
 import requests
 from io import StringIO
 
+# Use HTTPS URLs instead of FTP
 EXCHANGE_FILES = {
-    "NASDAQ": "ftp://ftp.nasdaqtrader.com/SymbolDirectory/nasdaqlisted.txt",
-    "NYSE/AMEX": "ftp://ftp.nasdaqtrader.com/SymbolDirectory/otherlisted.txt"
+    "NASDAQ": "https://ftp.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt",
+    "NYSE/AMEX": "https://ftp.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt"
 }
 
 st.title("Exchange Ticker List Preview")
