@@ -6,10 +6,14 @@ import time
 import os
 import logging
 import threading
+import plotly.graph_objects as go
+import plotly.express as px
 from sodapy import Socrata
 from yahooquery import Ticker
 from huggingface_hub import InferenceClient
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
+from scipy import stats
 
 # --- Logging ---
 logging.basicConfig(level=logging.INFO)
@@ -41,7 +45,12 @@ assets = {
     "MICRO ETHER - CHICAGO MERCANTILE EXCHANGE": "ETH=F",
     "E-MINI S&P FINANCIAL INDEX - CHICAGO MERCANTILE EXCHANGE": "ES=F",
     "DOW JONES U.S. REAL ESTATE IDX - CHICAGO BOARD OF TRADE": "DJR",
-}# --- Fetch COT Data ---
+    "NATURAL GAS - NEW YORK MERCANTILE EXCHANGE": "NG=F",
+    "CORN - CHICAGO BOARD OF TRADE": "ZC=F",
+    "SOYBEANS - CHICAGO BOARD OF TRADE": "ZS=F",
+}
+
+# --- Fetch COT Data ---
 def fetch_cot_data(market_name: str, max_attempts: int = 3) -> pd.DataFrame:
     logger.info(f"Fetching COT data for {market_name}")
     where_clause = f'market_and_exchange_names="{market_name}"'
@@ -59,11 +68,36 @@ def fetch_cot_data(market_name: str, max_attempts: int = 3) -> pd.DataFrame:
                 df["report_date"] = pd.to_datetime(df["report_date_as_yyyy_mm_dd"])
                 df["open_interest_all"] = pd.to_numeric(df["open_interest_all"], errors="coerce")
                 try:
-                    df["commercial_net"] = df["commercial_long_all"].astype(float) - df["commercial_short_all"].astype(float)
-                    df["non_commercial_net"] = df["non_commercial_long_all"].astype(float) - df["non_commercial_short_all"].astype(float)
+                    df["commercial_long"] = pd.to_numeric(df["commercial_long_all"], errors="coerce")
+                    df["commercial_short"] = pd.to_numeric(df["commercial_short_all"], errors="coerce")
+                    df["non_commercial_long"] = pd.to_numeric(df["non_commercial_long_all"], errors="coerce")
+                    df["non_commercial_short"] = pd.to_numeric(df["non_commercial_short_all"], errors="coerce")
+                    
+                    df["commercial_net"] = df["commercial_long"] - df["commercial_short"]
+                    df["non_commercial_net"] = df["non_commercial_long"] - df["non_commercial_short"]
+                    
+                    # Calculate commercial position index (0-100)
+                    df["commercial_position_pct"] = (df["commercial_long"] / 
+                                                    (df["commercial_long"] + df["commercial_short"])) * 100
+                    
+                    # Calculate non-commercial position index (0-100)
+                    df["non_commercial_position_pct"] = (df["non_commercial_long"] / 
+                                                        (df["non_commercial_long"] + df["non_commercial_short"])) * 100
+                    
+                    # Calculate z-scores for positioning extremes
+                    df["commercial_net_zscore"] = (df["commercial_net"] - 
+                                                 df["commercial_net"].rolling(52).mean()) / df["commercial_net"].rolling(52).std()
+                    df["non_commercial_net_zscore"] = (df["non_commercial_net"] - 
+                                                     df["non_commercial_net"].rolling(52).mean()) / df["non_commercial_net"].rolling(52).std()
+                    
                 except KeyError:
                     df["commercial_net"] = 0.0
                     df["non_commercial_net"] = 0.0
+                    df["commercial_position_pct"] = 50.0
+                    df["non_commercial_position_pct"] = 50.0
+                    df["commercial_net_zscore"] = 0.0
+                    df["non_commercial_net_zscore"] = 0.0
+                
                 return df.sort_values("report_date")
             else:
                 logger.warning(f"No COT data for {market_name}")
@@ -90,6 +124,10 @@ def fetch_yahooquery_data(ticker: str, start_date: str, end_date: str, max_attem
                 hist = hist.loc[ticker]
             hist = hist.reset_index()
             hist["date"] = pd.to_datetime(hist["date"])
+            
+            # Calculate technical indicators
+            hist = calculate_technical_indicators(hist)
+            
             return hist.sort_values("date")
         except Exception as e:
             logger.error(f"Error fetching Yahoo data for {ticker}: {e}")
@@ -98,217 +136,431 @@ def fetch_yahooquery_data(ticker: str, start_date: str, end_date: str, max_attem
     logger.error(f"Failed fetching Yahoo data for {ticker} after {max_attempts} attempts.")
     return pd.DataFrame()
 
-# --- Calculate Relative Volume (RVOL) ---
-def calculate_rvol(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
-    vol_col = "volume" if "volume" in df.columns else ("Volume" if "Volume" in df.columns else None)
-    if vol_col is None:
-        df["rvol"] = np.nan
+# --- Calculate Technical Indicators ---
+def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
         return df
-    rolling_avg = df[vol_col].rolling(window).mean()
-    df["rvol"] = df[vol_col] / rolling_avg
+    
+    close_col = "close" if "close" in df.columns else ("Close" if "Close" in df.columns else None)
+    high_col = "high" if "high" in df.columns else ("High" if "High" in df.columns else None)
+    low_col = "low" if "low" in df.columns else ("Low" if "Low" in df.columns else None)
+    
+    if not all([close_col, high_col, low_col]):
+        return df
+    
+    # Calculate RVOL
+    vol_col = "volume" if "volume" in df.columns else ("Volume" if "Volume" in df.columns else None)
+    if vol_col is not None:
+        rolling_avg = df[vol_col].rolling(20).mean()
+        df["rvol"] = df[vol_col] / rolling_avg
+    
+    # Calculate RSI
+    delta = df[close_col].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    
+    rs = avg_gain / avg_loss
+    df["rsi"] = 100 - (100 / (1 + rs))
+    
+    # Calculate Moving Averages
+    df["sma20"] = df[close_col].rolling(20).mean()
+    df["sma50"] = df[close_col].rolling(50).mean()
+    df["sma200"] = df[close_col].rolling(200).mean()
+    
+    # Calculate Bollinger Bands
+    df["bb_middle"] = df[close_col].rolling(20).mean()
+    df["bb_std"] = df[close_col].rolling(20).std()
+    df["bb_upper"] = df["bb_middle"] + 2 * df["bb_std"]
+    df["bb_lower"] = df["bb_middle"] - 2 * df["bb_std"]
+    df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["bb_middle"]
+    
+    # Calculate ATR
+    tr1 = df[high_col] - df[low_col]
+    tr2 = abs(df[high_col] - df[close_col].shift())
+    tr3 = abs(df[low_col] - df[close_col].shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df["atr14"] = tr.rolling(14).mean()
+    
+    # Volatility
+    df["volatility"] = df[close_col].pct_change().rolling(20).std() * np.sqrt(252) * 100
+    
+    # Calculate distance from 52-week high/low
+    df["52w_high"] = df[close_col].rolling(252).max()
+    df["52w_low"] = df[close_col].rolling(252).min()
+    df["pct_from_52w_high"] = (df[close_col] / df["52w_high"] - 1) * 100
+    df["pct_from_52w_low"] = (df[close_col] / df["52w_low"] - 1) * 100
+    
     return df
 
 # --- Merge COT and Price Data ---
 def merge_cot_price(cot_df: pd.DataFrame, price_df: pd.DataFrame) -> pd.DataFrame:
     if cot_df.empty or price_df.empty:
         return pd.DataFrame()
-    cot_df_small = cot_df[["report_date", "open_interest_all", "commercial_net", "non_commercial_net"]].copy()
+    
+    cot_columns = ["report_date", "open_interest_all", "commercial_net", "non_commercial_net", 
+                  "commercial_position_pct", "non_commercial_position_pct", 
+                  "commercial_net_zscore", "non_commercial_net_zscore"]
+    
+    # Ensure all required columns exist
+    for col in cot_columns:
+        if col not in cot_df.columns:
+            cot_df[col] = np.nan
+    
+    cot_df_small = cot_df[cot_columns].copy()
     cot_df_small.rename(columns={"report_date": "date"}, inplace=True)
     cot_df_small["date"] = pd.to_datetime(cot_df_small["date"])
+    
     price_df = price_df.copy()
     price_df["date"] = pd.to_datetime(price_df["date"])
     price_df = price_df.sort_values("date")
     cot_df_small = cot_df_small.sort_values("date")
+    
     full_dates = pd.DataFrame({"date": pd.date_range(price_df["date"].min(), price_df["date"].max())})
     cot_df_filled = pd.merge_asof(full_dates, cot_df_small, on="date", direction="backward")
-    merged = pd.merge(price_df, cot_df_filled[["date", "open_interest_all", "commercial_net", "non_commercial_net"]], on="date", how="left")
-    merged["open_interest_all"] = merged["open_interest_all"].ffill()
-    merged["commercial_net"] = merged["commercial_net"].ffill()
-    merged["non_commercial_net"] = merged["non_commercial_net"].ffill()
+    
+    merged = pd.merge(price_df, cot_df_filled, on="date", how="left")
+    
+    # Forward fill COT data (carried forward until next COT report)
+    for col in cot_columns[1:]:
+        merged[col] = merged[col].ffill()
+    
     return merged
 
-# --- Health Gauge Calculation ---
-def calculate_health_gauge(cot_df: pd.DataFrame, price_df: pd.DataFrame) -> float:
-    if cot_df.empty or price_df.empty:
+# --- Calculate Health Gauge ---
+def calculate_health_gauge(merged_df: pd.DataFrame) -> float:
+    if merged_df.empty:
         return np.nan
-    last_date = pd.to_datetime(price_df["date"]).max()
-    one_year_ago = last_date - pd.Timedelta(days=365)
-    three_months_ago = last_date - pd.Timedelta(days=90)
+    
+    # Get latest data
+    latest = merged_df.tail(1).iloc[0]
+    recent = merged_df.tail(90).copy()
+    
+    close_col = "close" if "close" in recent.columns else ("Close" if "Close" in recent.columns else None)
+    
+    if close_col is None:
+        return np.nan
+    
+    scores = []
+    
+    # 1. Commercial net position extreme score (25%)
+    if "commercial_net_zscore" in latest and not pd.isna(latest["commercial_net_zscore"]):
+        # Commercials are smart money - going against the crowd
+        # Higher score when commercials are net long against the crowd (negative z-score)
+        comm_score = max(0, min(1, 0.5 - latest["commercial_net_zscore"]/4))
+        scores.append((comm_score, 0.25))
+    
+    # 2. Trend alignment score (20%)
+    if all(x in recent.columns for x in [close_col, "sma20", "sma50", "sma200"]):
+        last_close = latest[close_col]
+        trend_signals = [
+            last_close > latest["sma20"],  # Above 20-day MA
+            latest["sma20"] > latest["sma50"],  # 20-day MA above 50-day MA
+            latest["sma50"] > latest["sma200"],  # 50-day MA above 200-day MA
+        ]
+        trend_score = sum(trend_signals) / len(trend_signals)
+        scores.append((trend_score, 0.20))
+    
+    # 3. Momentum score (15%)
+    if "rsi" in recent.columns:
+        # RSI score - prefer middle-high range (40-70)
+        rsi = latest["rsi"]
+        if pd.isna(rsi):
+            rsi_score = 0.5
+        elif rsi < 30:
+            rsi_score = 0.3  # Oversold
+        elif rsi > 70:
+            rsi_score = 0.7  # Overbought
+        else:
+            rsi_score = 0.5 + (rsi - 50) / 100  # Linear between 0.5 and 0.7
+        scores.append((rsi_score, 0.15))
+    
+    # 4. Volatility and volume score (15%)
+    vol_score = 0.5
+    if "bb_width" in recent.columns and "rvol" in recent.columns:
+        # Normalize BB width
+        bb_width_percentile = stats.percentileofscore(
+            recent["bb_width"].dropna(), latest["bb_width"]) / 100
+        
+        # Higher score for contracting volatility (coiling for move)
+        bb_score = 1 - bb_width_percentile
+        
+        # Volume score - recent relative volume
+        rvol_score = min(1.0, latest["rvol"] / 2.0) if not pd.isna(latest["rvol"]) else 0.5
+        
+        vol_score = 0.7 * bb_score + 0.3 * rvol_score
+        scores.append((vol_score, 0.15))
+    
+    # 5. Distance from 52-week high/low score (15%)
+    if "pct_from_52w_high" in recent.columns and "pct_from_52w_low" in recent.columns:
+        # Higher score when closer to 52-week high
+        high_score = 1 - (abs(latest["pct_from_52w_high"]) / 100)
+        high_score = max(0, min(1, high_score))
+        
+        # Higher score when further from 52-week low
+        low_score = min(1, latest["pct_from_52w_low"] / 100)
+        low_score = max(0, min(1, low_score))
+        
+        # Combine with preference to high_score
+        dist_score = 0.7 * high_score + 0.3 * low_score
+        scores.append((dist_score, 0.15))
+    
+    # 6. Open interest score (10%)
+    if "open_interest_all" in recent.columns:
+        oi = recent["open_interest_all"].dropna()
+        if not oi.empty:
+            oi_pctile = stats.percentileofscore(oi, latest["open_interest_all"]) / 100
+            # Prefer higher open interest
+            oi_score = oi_pctile
+            scores.append((oi_score, 0.10))
+    
+    # Calculate weighted score
+    if not scores:
+        return 5.0  # Neutral if no data
+    
+    weighted_sum = sum(score * weight for score, weight in scores)
+    total_weight = sum(weight for _, weight in scores)
+    
+    # Scale to 0-10
+    health_score = (weighted_sum / total_weight) * 10
+    
+    return float(health_score)
 
-    oi = price_df["open_interest_all"].dropna()
-    oi_score = float((oi - oi.min()) / (oi.max() - oi.min() + 1e-9).iloc[-1]) if not oi.empty else 0.0
+# --- Signal Generation ---
+# --- Trading Signal Generation ---
+def generate_signals(df: pd.DataFrame, cot_df: pd.DataFrame) -> list:
+    signals = []
+    if df is None or df.empty or cot_df is None or cot_df.empty:
+        return signals
 
-    commercial = cot_df[["report_date", "commercial_net"]].dropna().copy()
-    commercial["report_date"] = pd.to_datetime(commercial["report_date"])
-    st_score = 0.0
-    short_term = commercial[commercial["report_date"] >= three_months_ago]
-    if not short_term.empty:
-        st_score = float((short_term["commercial_net"].iloc[-1] - short_term["commercial_net"].min()) / 
-                         (short_term["commercial_net"].max() - short_term["commercial_net"].min() + 1e-9))
+    latest = df.iloc[-1]
+    cot_latest = cot_df.iloc[-1]
 
-    noncomm = cot_df[["report_date", "non_commercial_net"]].dropna().copy()
-    noncomm["report_date"] = pd.to_datetime(noncomm["report_date"])
-    lt_score = 0.0
-    long_term = noncomm[noncomm["report_date"] >= one_year_ago]
-    if not long_term.empty:
-        lt_score = float((long_term["non_commercial_net"].iloc[-1] - long_term["non_commercial_net"].min()) /
-                         (long_term["non_commercial_net"].max() - long_term["non_commercial_net"].min() + 1e-9))
-
-    cot_analytics = 0.4 * st_score + 0.6 * lt_score
-
-    recent = price_df[pd.to_datetime(price_df["date"]) >= three_months_ago].copy()
-    pv_score = 0.0
-    if not recent.empty:
-        close_col = "close" if "close" in recent.columns else ("Close" if "Close" in recent.columns else None)
-        vol_col = "volume" if "volume" in recent.columns else ("Volume" if "Volume" in recent.columns else None)
-        if close_col and vol_col and "rvol" in recent.columns:
-            recent["return"] = recent[close_col].pct_change().fillna(0.0)
-            rvol_75 = recent["rvol"].quantile(0.75)
-            recent["vol_avg20"] = recent[vol_col].rolling(20).mean()
-            recent["vol_spike"] = recent[vol_col] > recent["vol_avg20"]
-            filt = recent[(recent["rvol"] >= rvol_75) & (recent["vol_spike"])]
-            if not filt.empty:
-                last_ret = float(filt["return"].iloc[-1])
-                bucket = 5 if last_ret >= 0.02 else 4 if last_ret >= 0.01 else 3 if last_ret >= -0.01 else 2 if last_ret >= -0.02 else 1
-                pv_score = (bucket - 1) / 4.0
-
-    return float((0.25 * oi_score + 0.35 * cot_analytics + 0.40 * pv_score) * 10.0)
-
-# --- Threaded batch fetching (unchanged) ---
-# ... (reuse fetch_batch and fetch_all_data from previous chunk)
-
-# --- Forecasting Module ---
-def generate_forecasts(price_results: dict, forecast_days: int = 7) -> dict:
-    forecasts = {}
-    for asset, df in price_results.items():
-        if df.empty:
-            forecasts[asset] = []
-            continue
-        close_col = "close" if "close" in df.columns else ("Close" if "Close" in df.columns else None)
-        if close_col is None or df.shape[0] < 10:
-            forecasts[asset] = []
-            continue
-        recent = df.tail(30).copy()
-        recent["day_index"] = np.arange(len(recent))
-        X = recent[["day_index"]].values
-        y = recent[close_col].values
-        model = LinearRegression()
-        model.fit(X, y)
-        future_index = np.arange(len(recent), len(recent) + forecast_days).reshape(-1, 1)
-        pred = model.predict(future_index)
-        forecasts[asset] = pred.tolist()
-    return forecasts
-
-# --- LLM Prompt Builder ---
-def build_llm_prompt(price_results: dict, cot_results: dict, forecasts: dict) -> str:
-    prompt = (
-        "You are an expert market analyst.\n\n"
-        "For each asset, generate a separate titled paragraph using <div> formatting for the title. "
-        "Format your response in ChatGPT-style paragraphs. Include next 7-day forecasts if provided.\n\n"
-    )
-
-    for cot_name, merged_df in price_results.items():
-        if merged_df.empty or "health_score" not in merged_df.columns:
-            continue
-        health_score = float(merged_df["health_score"].iloc[-1])
-        recent = merged_df.tail(90).copy()
-        close_col = "close" if "close" in recent.columns else ("Close" if "Close" in recent.columns else None)
-        if close_col is None:
-            continue
-        current_price = float(recent[close_col].iloc[-1])
-        high_7d, low_7d = float(recent[close_col].tail(7).max()), float(recent[close_col].tail(7).min())
-        high_30d, low_30d = float(recent[close_col].tail(30).max()), float(recent[close_col].tail(30).min())
-        forecasted = forecasts.get(cot_name, [])
-        forecast_text = ""
-        if forecasted:
-            forecast_text = "Next 7-day forecasted prices: " + ", ".join([f"{p:.2f}" for p in forecasted]) + ". "
-
-        prompt += (
-            f"<div style='font-size:18px;font-weight:bold;'>{cot_name}</div>\n"
-            f"Health Gauge Score: {health_score:.2f}. "
-            f"Current price: {current_price:.2f}. "
-            f"Last 7 sessions: {low_7d:.2f}-{high_7d:.2f}, "
-            f"last 30 sessions: {low_30d:.2f}-{high_30d:.2f}. "
-            f"{forecast_text}\n"
+    # Example trading rules
+    if (
+        latest["rsi"] < 30
+        and latest["close"] > latest["sma50"]
+        and cot_latest["noncomm_positions_change"] > 0
+    ):
+        signals.append(
+            {
+                "signal": "BUY",
+                "reason": "RSI oversold, price above SMA50, non-commercial longs increasing",
+            }
+        )
+    elif (
+        latest["rsi"] > 70
+        and latest["close"] < latest["sma50"]
+        and cot_latest["noncomm_positions_change"] < 0
+    ):
+        signals.append(
+            {
+                "signal": "SELL",
+                "reason": "RSI overbought, price below SMA50, non-commercial longs decreasing",
+            }
+        )
+    else:
+        signals.append(
+            {
+                "signal": "NEUTRAL",
+                "reason": "No strong signal detected",
+            }
         )
 
-        if health_score < 3:
-            prompt += (
-                "This low reading suggests a sell regime may be developing or already active. "
-                "Give more weight to sessions where price declines coincide with relative volume spikes. "
-            )
-        elif health_score > 5:
-            prompt += (
-                "This elevated reading indicates a buy regime may be developing or already in place. "
-                "Prioritize sessions where price advances occur alongside relative volume spikes. "
-            )
-        else:
-            prompt += (
-                "The reading is moderate, pointing to possible consolidation or indecision. "
-                "Watch for expansion days where relative volume spikes in the direction of the break. "
-            )
+    return signals
 
-        prompt += f"Key levels to monitor: 7-day high {high_7d:.2f}, 7-day low {low_7d:.2f}, 30-day high {high_30d:.2f}, 30-day low {low_30d:.2f}.\n\n"
 
-    return prompt
+# --- Relative Volume Calculation ---
+def calculate_rvol(df: pd.DataFrame, lookback: int = 20) -> pd.Series:
+    if "volume" not in df.columns:
+        return pd.Series([np.nan] * len(df), index=df.index)
+    avg_volume = df["volume"].rolling(window=lookback).mean()
+    return df["volume"] / avg_volume
 
-# --- Main Streamlit App ---
+
+# --- Trade Setup Generation ---
+def generate_trade_setup(signal: str, df: pd.DataFrame) -> dict:
+    if df is None or df.empty:
+        return {}
+    latest = df.iloc[-1]
+
+    setup = {"signal": signal}
+    atr = latest.get("atr", np.nan)
+
+    if signal == "BUY":
+        setup["stop_loss"] = latest["close"] - (2 * atr)
+        setup["target"] = latest["close"] + (3 * atr)
+    elif signal == "SELL":
+        setup["stop_loss"] = latest["close"] + (2 * atr)
+        setup["target"] = latest["close"] - (3 * atr)
+    else:
+        setup["stop_loss"] = None
+        setup["target"] = None
+
+    return setup
+
+
+# --- AI Market Newsletter Generation ---
+def build_newsletter_prompt(asset: str, signals: list, df: pd.DataFrame, cot_df: pd.DataFrame) -> str:
+    if df is None or df.empty or cot_df is None or cot_df.empty:
+        return f"No sufficient data available for {asset}."
+
+    latest = df.iloc[-1]
+    cot_latest = cot_df.iloc[-1]
+    signal_texts = [f"{s['signal']} ({s['reason']})" for s in signals]
+
+    prompt = f"""
+    Generate a professional market newsletter for {asset}.
+
+    Key Data:
+    - Latest close price: {latest['close']:.2f}
+    - RSI: {latest['rsi']:.2f}
+    - SMA50: {latest['sma50']:.2f}
+    - SMA200: {latest['sma200']:.2f}
+    - Bollinger Bands: {latest['bb_low']:.2f} – {latest['bb_high']:.2f}
+    - ATR: {latest['atr']:.2f}
+    - Relative Volume: {latest.get('rvol', np.nan):.2f}
+    - 52w High/Low: {latest['52w_low']:.2f} – {latest['52w_high']:.2f}
+
+    Commitment of Traders:
+    - Non-commercial net positions: {cot_latest['noncomm_net']}
+    - Commercial net positions: {cot_latest['commercial_net']}
+
+    Signals: {", ".join(signal_texts)}
+
+    Write in a structured, concise, professional style.
+    """
+    return prompt.strip()
+
+
+def generate_market_newsletter(prompt: str) -> str:
+    try:
+        response = hf_client.text_generation(
+            model="mistralai/Mistral-7B-Instruct-v0.3",
+            inputs=prompt,
+            parameters={"max_new_tokens": 500},
+        )
+        return response.get("generated_text", "").strip()
+    except Exception as e:
+        logger.error(f"Newsletter generation failed: {e}")
+        return "Error generating newsletter."
+
+
+# --- Visualization ---
+def create_asset_chart(df: pd.DataFrame, cot_df: pd.DataFrame, asset_name: str):
+    fig = make_subplots(
+        rows=2, cols=1, shared_xaxes=True,
+        row_heights=[0.7, 0.3],
+        vertical_spacing=0.05,
+        subplot_titles=(f"{asset_name} Price & Indicators", "COT Non-Commercial Net Positions")
+    )
+
+    # Candlestick chart
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df["open"], high=df["high"],
+        low=df["low"], close=df["close"], name="Price"
+    ), row=1, col=1)
+
+    # Moving averages
+    fig.add_trace(go.Scatter(x=df.index, y=df["sma50"], mode="lines", name="SMA50"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["sma200"], mode="lines", name="SMA200"), row=1, col=1)
+
+    # Bollinger Bands
+    fig.add_trace(go.Scatter(x=df.index, y=df["bb_high"], mode="lines", line=dict(width=1), name="BB High"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df["bb_low"], mode="lines", line=dict(width=1), name="BB Low"), row=1, col=1)
+
+    # COT Net Positions
+    fig.add_trace(go.Bar(x=cot_df.index, y=cot_df["noncomm_net"], name="Non-Comm Net"), row=2, col=1)
+
+    fig.update_layout(template="plotly_dark", height=800)
+    return fig
+
+
+# --- Opportunity Dashboard ---
+def create_opportunity_dashboard(opportunities: dict):
+    df = pd.DataFrame(opportunities).T
+    df["health_gauge"] = df["health_gauge"].astype(float)
+    df = df.sort_values(by="health_gauge", ascending=False)
+    return df
+
+# --- Streamlit App ---
 def main():
-    st.set_page_config(page_title="COT Futures Health Gauge & Newsletter", layout="wide")
-    st.title("COT Futures Health Gauge Dashboard")
+    st.set_page_config(page_title="Market Dashboard", layout="wide")
+    st.title("📊 Market Intelligence Dashboard")
 
-    if "data_loaded" not in st.session_state:
-        st.session_state.data_loaded = False
-    if "cot_results" not in st.session_state:
-        st.session_state.cot_results = {}
-    if "price_results" not in st.session_state:
-        st.session_state.price_results = {}
-    if "forecasts" not in st.session_state:
-        st.session_state.forecasts = {}
-    if "newsletter_text" not in st.session_state:
-        st.session_state.newsletter_text = ""
+    # Sidebar
+    st.sidebar.header("Controls")
+    selected_date = st.sidebar.date_input("Select Date", datetime.date.today())
+    refresh_data = st.sidebar.button("🔄 Refresh Data")
+    report_type = st.sidebar.selectbox("Report Type", ["Dashboard", "Detailed Analysis", "Newsletter"])
 
-    today = datetime.date.today()
-    default_start = today - datetime.timedelta(days=365)
-    start_date = st.date_input("Select Start Date", default_start)
-    end_date = st.date_input("Select End Date", today)
-    if start_date >= end_date:
-        st.error("Start Date must be before End Date.")
-        return
+    # Newsletter generation option
+    if st.sidebar.button("📰 Generate Newsletter"):
+        st.session_state["generate_newsletter"] = True
 
-    if not st.session_state.data_loaded:
-        with st.spinner("Loading data..."):
-            cot_res, price_res = fetch_all_data(assets, start_date, end_date, batch_size=5)
-            st.session_state.cot_results = cot_res
-            st.session_state.price_results = price_res
-            st.session_state.forecasts = generate_forecasts(price_res)
-            st.session_state.data_loaded = True
-        st.success("Data loaded successfully. You may now generate the newsletter.")
+    # Fetch & process data
+    opportunities = {}
+    for cot_name, ticker in ASSET_MAPPING.items():
+        cot_df = fetch_cot_data(cot_name)
+        price_df = fetch_yahooquery_data(ticker)
+        if cot_df is None or price_df is None:
+            continue
 
-    if st.button("Generate Newsletter"):
-        if not st.session_state.data_loaded or not st.session_state.price_results:
-            st.warning("Data not ready yet.")
+        merged_df = merge_cot_price(cot_df, price_df)
+        if merged_df is None or merged_df.empty:
+            continue
+
+        health = calculate_health_gauge(cot_df, price_df)
+        signals = generate_signals(merged_df, cot_df)
+        trade_setup = generate_trade_setup(signals[0]["signal"], merged_df) if signals else {}
+
+        opportunities[cot_name] = {
+            "ticker": ticker,
+            "health_gauge": health,
+            "signals": signals,
+            "trade_setup": trade_setup,
+            "cot_df": cot_df,
+            "price_df": merged_df,
+        }
+
+    # Tabs
+    tabs = st.tabs(["📈 Market Dashboard", "🔍 Detailed Analysis", "📰 Market Newsletter"])
+
+    # --- Dashboard Tab ---
+    with tabs[0]:
+        st.subheader("Market Opportunities")
+        dashboard_df = create_opportunity_dashboard(opportunities)
+        st.dataframe(dashboard_df[["health_gauge"]])
+
+    # --- Detailed Analysis Tab ---
+    with tabs[1]:
+        asset_choice = st.selectbox("Select Asset", list(opportunities.keys()))
+        asset_data = opportunities[asset_choice]
+        fig = create_asset_chart(asset_data["price_df"], asset_data["cot_df"], asset_choice)
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.write("**Signals:**", asset_data["signals"])
+        st.write("**Trade Setup:**", asset_data["trade_setup"])
+        st.write("**COT Latest:**", asset_data["cot_df"].tail(1).T)
+        st.write("**Technical Indicators:**", asset_data["price_df"].tail(1).T)
+
+    # --- Newsletter Tab ---
+    with tabs[2]:
+        if "generate_newsletter" in st.session_state and st.session_state["generate_newsletter"]:
+            st.subheader("Generated Market Newsletter")
+
+            all_newsletters = []
+            for asset, data in opportunities.items():
+                prompt = build_newsletter_prompt(asset, data["signals"], data["price_df"], data["cot_df"])
+                newsletter = generate_market_newsletter(prompt)
+                all_newsletters.append(f"### {asset}\n{newsletter}\n")
+
+            st.markdown("\n\n".join(all_newsletters))
         else:
-            with st.spinner("Generating newsletter..."):
-                prompt = build_llm_prompt(
-                    st.session_state.price_results,
-                    st.session_state.cot_results,
-                    st.session_state.forecasts,
-                )
-                try:
-                    completion = hf_client.chat.completions.create(
-                        model="meta-llama/Llama-3.1-8B-Instruct",
-                        messages=[{"role": "user", "content": prompt}],
-                    )
-                    msg = completion.choices[0].message
-                    content = msg.content if hasattr(msg, "content") else msg["content"]
-                    st.session_state.newsletter_text = content
-                except Exception as e:
-                    st.error(f"Failed to generate newsletter: {e}")
+            st.info("Click '📰 Generate Newsletter' in the sidebar to create a report.")
 
-    if st.session_state.newsletter_text:
-        st.markdown("### Market Newsletter")
-        st.write(st.session_state.newsletter_text)
 
 if __name__ == "__main__":
     main()
