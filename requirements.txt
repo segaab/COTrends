@@ -34,4 +34,6 @@ requests>=2.32
 sqlalchemy>=2.0
 pymysql
 
+lxml==4.9.4
+
 
