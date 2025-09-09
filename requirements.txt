@@ -1,5 +1,6 @@
 # Core dependencies
-lxml==4.9.4
+lxml
+
 streamlit>=1.41.0
 sodapy>=2.2.0
 python-dotenv>=1.0.0
