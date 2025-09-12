@@ -229,44 +229,35 @@ def calculate_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # --- Merge COT and Price Data ---
-def merge_cot_price(cot_df: pd.DataFrame, price_df: pd.DataFrame) -> pd.DataFrame:
-    if cot_df is None or cot_df.empty or price_df is None or price_df.empty:
-        return pd.DataFrame()
+def merge_cot_price(cot_df, price_df):
+    # Ensure date columns are datetime
+    cot_df["date"] = pd.to_datetime(cot_df["date"], errors="coerce")
+    price_df["date"] = pd.to_datetime(price_df["date"], errors="coerce")
 
-    cot_columns = ["report_date", "open_interest_all", "commercial_net", "non_commercial_net",
-                   "commercial_position_pct", "non_commercial_position_pct",
-                   "commercial_net_zscore", "non_commercial_net_zscore"]
+    # Create continuous date range covering both datasets
+    start_date = min(cot_df["date"].min(), price_df["date"].min())
+    end_date = max(cot_df["date"].max(), price_df["date"].max())
+    full_dates = pd.DataFrame({"date": pd.date_range(start=start_date, end=end_date, freq="D")})
 
-    for col in cot_columns:
-        if col not in cot_df.columns:
-            cot_df[col] = np.nan
+    # Strip timezone if present (make both tz-naive)
+    if pd.api.types.is_datetime64tz_dtype(full_dates["date"]):
+        full_dates["date"] = full_dates["date"].dt.tz_convert(None)
+    if pd.api.types.is_datetime64tz_dtype(cot_df["date"]):
+        cot_df["date"] = cot_df["date"].dt.tz_convert(None)
+    if pd.api.types.is_datetime64tz_dtype(price_df["date"]):
+        price_df["date"] = price_df["date"].dt.tz_convert(None)
 
-    cot_df_small = cot_df[cot_columns].copy()
-    cot_df_small = cot_df_small.rename(columns={"report_date": "date"})
-    cot_df_small["date"] = pd.to_datetime(cot_df_small["date"])
+    # Reduce COT data to essential columns
+    cot_df_small = cot_df[["date", "noncomm_long", "noncomm_short", "comm_long", "comm_short"]]
 
-    price_df = price_df.copy()
-    price_df["date"] = pd.to_datetime(price_df["date"])
-    price_df = price_df.sort_values("date").reset_index(drop=True)
-    cot_df_small = cot_df_small.sort_values("date").reset_index(drop=True)
+    # Merge with full_dates to fill gaps using asof
+    cot_df_filled = pd.merge_asof(full_dates, cot_df_small.sort_values("date"), on="date", direction="backward")
+    price_df_filled = pd.merge_asof(full_dates, price_df.sort_values("date"), on="date", direction="backward")
 
-    full_dates = pd.DataFrame({"date": pd.date_range(price_df["date"].min(), price_df["date"].max())})
-    cot_df_filled = pd.merge_asof(full_dates, cot_df_small, on="date", direction="backward")
+    # Merge cot + price together
+    merged_df = pd.merge(cot_df_filled, price_df_filled, on="date", how="inner")
 
-    merged = pd.merge(price_df, cot_df_filled, on="date", how="left")
-    # forward fill COT numeric fields
-    merged = merged.sort_values("date").reset_index(drop=True)
-    for col in cot_columns[1:]:
-        merged[col] = merged[col].ffill()
-    # keep consistent column names for downstream logic
-    merged = merged.rename(columns={
-        "open_interest_all": "open_interest_all",
-        "commercial_net": "commercial_net",
-        "non_commercial_net": "noncommercial_net",  # unify naming used elsewhere
-        "commercial_net_zscore": "commercial_net_zscore",
-        "non_commercial_net_zscore": "noncommercial_net_zscore"
-    })
-    return merged
+    return merged_df
 
 # --- Calculate Health Gauge (expects merged_df) ---
 def calculate_health_gauge(merged_df: pd.DataFrame) -> float:
